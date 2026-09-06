@@ -1,0 +1,14 @@
+/bin/
+*.db
+*.db-shm
+*.db-wal
+/browser/*/dist/
+/browser/*/node_modules/
+coverage.txt
+
+# local secrets / scratch (never commit)
+anthropic_api_key
+*_api_key
+full_plan.md
+.env
+plan.md

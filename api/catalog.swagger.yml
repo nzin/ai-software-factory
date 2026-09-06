@@ -1,0 +1,307 @@
+swagger: "2.0"
+info:
+  title: AI Software Factory - Catalog
+  description: >
+    The catalog service is the source of truth for the agent roster of the
+    AI Software Factory. It stores, for every agent, its A2A registration
+    (identity, skills, endpoint) and its model configuration (which Claude
+    model and parameters the agent must use). It also assembles the agent's
+    A2A AgentCard with the model configuration surfaced as a custom extension.
+  version: 0.1.0
+basePath: /
+consumes:
+  - application/json
+produces:
+  - application/json
+schemes:
+  - http
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Liveness probe
+      responses:
+        200:
+          description: service is healthy
+          schema:
+            $ref: "#/definitions/Health"
+
+  /v1/agents:
+    get:
+      tags: [agents]
+      operationId: listAgents
+      summary: List registered agents
+      parameters:
+        - name: skill
+          in: query
+          type: string
+          description: only return agents whose skills contain this tag
+        - name: enabled
+          in: query
+          type: boolean
+          description: filter by enabled flag
+      responses:
+        200:
+          description: the list of registered agents
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/AgentRegistration"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/agents/{role}:
+    parameters:
+      - name: role
+        in: path
+        required: true
+        type: string
+        description: stable role key, e.g. "planner"
+    put:
+      tags: [agents]
+      operationId: putAgent
+      summary: Register or update an agent (idempotent upsert)
+      description: >
+        Creates the agent if it does not exist, otherwise updates its
+        registration fields. The embedded modelConfig is only applied when the
+        agent is first created, unless forceModel=true is passed.
+      parameters:
+        - name: forceModel
+          in: query
+          type: boolean
+          description: also overwrite the stored model configuration
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/PutAgentRequest"
+      responses:
+        200:
+          description: the stored agent
+          schema:
+            $ref: "#/definitions/AgentDetail"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+    get:
+      tags: [agents]
+      operationId: getAgent
+      summary: Get one agent, including its assembled AgentCard
+      responses:
+        200:
+          description: the agent detail
+          schema:
+            $ref: "#/definitions/AgentDetail"
+        404:
+          description: no such agent
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+    delete:
+      tags: [agents]
+      operationId: deleteAgent
+      summary: Deregister an agent
+      responses:
+        204:
+          description: deleted
+        404:
+          description: no such agent
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/agents/{role}/model:
+    parameters:
+      - name: role
+        in: path
+        required: true
+        type: string
+    get:
+      tags: [agents]
+      operationId: getAgentModel
+      summary: Get the model configuration an agent must use
+      responses:
+        200:
+          description: the model configuration
+          schema:
+            $ref: "#/definitions/ModelConfig"
+        404:
+          description: no such agent
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+    patch:
+      tags: [agents]
+      operationId: patchAgentModel
+      summary: Operator override of an agent's model configuration
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/ModelConfigPatch"
+      responses:
+        200:
+          description: the updated model configuration
+          schema:
+            $ref: "#/definitions/ModelConfig"
+        404:
+          description: no such agent
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+definitions:
+  Health:
+    type: object
+    required: [status]
+    properties:
+      status:
+        type: string
+        example: ok
+
+  Error:
+    type: object
+    required: [message]
+    properties:
+      message:
+        type: string
+
+  ModelConfig:
+    type: object
+    required: [provider, model]
+    properties:
+      provider:
+        type: string
+        example: anthropic
+      model:
+        type: string
+        example: claude-opus-5
+      maxTokens:
+        type: integer
+        format: int64
+        example: 16000
+      effort:
+        type: string
+        description: 'go-swagger: one of low|medium|high|xhigh|max (empty = default)'
+        enum: ["", low, medium, high, xhigh, max]
+      thinking:
+        type: string
+        enum: ["", adaptive, "off"]
+      params:
+        type: object
+        additionalProperties: true
+
+  ModelConfigPatch:
+    type: object
+    properties:
+      provider:
+        type: string
+      model:
+        type: string
+      maxTokens:
+        type: integer
+        format: int64
+      effort:
+        type: string
+        enum: ["", low, medium, high, xhigh, max]
+      thinking:
+        type: string
+        enum: ["", adaptive, "off"]
+      params:
+        type: object
+        additionalProperties: true
+
+  AgentRegistration:
+    type: object
+    required: [role, name, baseURL, transport]
+    properties:
+      role:
+        type: string
+      name:
+        type: string
+      description:
+        type: string
+      baseURL:
+        type: string
+        description: base URL of the agent's A2A server (no path)
+      transport:
+        type: string
+        enum: [JSONRPC, GRPC, HTTP+JSON]
+        default: JSONRPC
+      skills:
+        type: array
+        items:
+          type: string
+      concurrency:
+        type: integer
+        description: max in-flight tasks the coordinator will send this agent
+        default: 1
+      enabled:
+        type: boolean
+        default: true
+      createdAt:
+        type: string
+        format: date-time
+        readOnly: true
+      updatedAt:
+        type: string
+        format: date-time
+        readOnly: true
+
+  PutAgentRequest:
+    type: object
+    required: [name, baseURL]
+    properties:
+      name:
+        type: string
+      description:
+        type: string
+      baseURL:
+        type: string
+      transport:
+        type: string
+        enum: [JSONRPC, GRPC, HTTP+JSON]
+        default: JSONRPC
+      skills:
+        type: array
+        items:
+          type: string
+      concurrency:
+        type: integer
+        default: 1
+      enabled:
+        type: boolean
+        default: true
+      modelConfig:
+        $ref: "#/definitions/ModelConfig"
+
+  AgentDetail:
+    type: object
+    required: [registration, modelConfig]
+    properties:
+      registration:
+        $ref: "#/definitions/AgentRegistration"
+      modelConfig:
+        $ref: "#/definitions/ModelConfig"
+      agentCard:
+        type: object
+        additionalProperties: true
+        description: the assembled A2A AgentCard (free-form; mirrors a2a.AgentCard)

@@ -1,0 +1,157 @@
+swagger: "2.0"
+info:
+  title: AI Software Factory - Coordinator
+  description: >
+    The coordinator accepts a PRD (Product Requirements Definition), discovers
+    the specialized agents through the catalog, and drives a run to produce an
+    implementation plan (Phase 1) and later a Pull Request. Each run carries a
+    TTL / budget so it can never loop forever.
+  version: 0.1.0
+basePath: /
+consumes:
+  - application/json
+produces:
+  - application/json
+schemes:
+  - http
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Liveness probe
+      responses:
+        200:
+          description: service is healthy
+          schema:
+            $ref: "#/definitions/Health"
+
+  /v1/prd:
+    post:
+      tags: [runs]
+      operationId: submitPRD
+      summary: Submit a PRD and run it through the factory
+      description: >
+        Phase 1 responds when the run has completed (or stopped in
+        needs_human_review). Later phases make this asynchronous.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/SubmitPRDRequest"
+      responses:
+        200:
+          description: the run result
+          schema:
+            $ref: "#/definitions/Run"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+definitions:
+  Health:
+    type: object
+    required: [status]
+    properties:
+      status:
+        type: string
+        example: ok
+
+  Error:
+    type: object
+    required: [message]
+    properties:
+      message:
+        type: string
+
+  PRD:
+    type: object
+    required: [title]
+    properties:
+      title:
+        type: string
+      description:
+        type: string
+      acceptanceCriteria:
+        type: array
+        items:
+          type: string
+
+  SubmitPRDRequest:
+    type: object
+    properties:
+      prd:
+        $ref: "#/definitions/PRD"
+      markdown:
+        type: string
+        description: raw markdown PRD; used when prd is not provided
+      iterationBudget:
+        type: integer
+        description: override the default per-run iteration budget
+      deadlineSeconds:
+        type: integer
+        description: override the default per-run wall-clock budget, in seconds
+
+  Finding:
+    type: object
+    properties:
+      source:
+        type: string
+        enum: [human, security-reviewer, code-reviewer]
+      targetRole:
+        type: string
+      note:
+        type: string
+
+  Task:
+    type: object
+    properties:
+      role:
+        type: string
+      taskID:
+        type: string
+      state:
+        type: string
+      output:
+        type: string
+
+  Run:
+    type: object
+    required: [id, status, stage]
+    properties:
+      id:
+        type: string
+      contextID:
+        type: string
+      status:
+        type: string
+        enum: [queued, running, pr_ready, accepted, changes_requested, needs_human_review, failed, done]
+      stage:
+        type: string
+      reason:
+        type: string
+        description: why the run stopped, when status is needs_human_review or failed
+      iterationsRemaining:
+        type: integer
+      deadline:
+        type: string
+        format: date-time
+      plan:
+        type: string
+      findings:
+        type: array
+        items:
+          $ref: "#/definitions/Finding"
+      tasks:
+        type: array
+        items:
+          $ref: "#/definitions/Task"
+      createdAt:
+        type: string
+        format: date-time
+      updatedAt:
+        type: string
+        format: date-time
