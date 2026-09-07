@@ -34,6 +34,7 @@ CATALOG_PID=$!
 until curl -sf 127.0.0.1:8080/healthz >/dev/null; do sleep 0.2; done
 
 echo "== starting planner agent on :9101 =="
+# run from the repo root so the default --prompts-dir (agent_prompts) resolves
 ./bin/agent-planner --addr 127.0.0.1:9101 --public-url http://127.0.0.1:9101 --catalog-url http://127.0.0.1:8080 &
 PLANNER_PID=$!
 until curl -sf 127.0.0.1:9101/.well-known/agent-card.json >/dev/null; do sleep 0.2; done

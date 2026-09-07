@@ -45,6 +45,24 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
   the catalog, fetches its effective model config, serves
   `/.well-known/agent-card.json` and `/invoke`.
 
+### Agent prompts
+
+Each agent's **system prompt** is a file — `agent_prompts/<role>.md` — read from
+disk at startup (no rebuild to change it; the agent fails to start if the file is
+missing). An optional YAML front-matter block overrides the agent's
+`name` / `description` / `skills`:
+
+```markdown
+---
+name: Planner
+skills: [planning, architecture, breakdown]
+---
+You are a senior software architect …
+```
+
+Override the directory with `--prompts-dir` or `ASF_PROMPTS_DIR`. See
+[agent_prompts/README.md](agent_prompts/README.md).
+
 ### "The model to use"
 
 `a2a.AgentCard` has no field for a model, so the model configuration is carried
@@ -111,13 +129,15 @@ The coordinator can also run as an HTTP service: `./bin/coordinator serve --addr
 
 | Path | What |
 |---|---|
+| `agent_prompts/<role>.md` | each agent's system prompt (+ optional front-matter) |
 | `api/*.swagger.yml` | OpenAPI 2.0 specs — source of truth for the REST APIs |
 | `internal/<svc>/gen/` | `go-swagger` output (committed) |
 | `internal/modelext/` | the model-configuration A2A extension |
 | `internal/catalog/` | catalog store (GORM/SQLite), service, handlers, card builder |
 | `internal/llm/` | Anthropic/Claude wrapper |
-| `internal/agentkit/` | agent bootstrap: register → fetch model → serve A2A |
-| `internal/agents/planner/` | the planner agent (executor + system prompt) |
+| `internal/agentprompts/` | loads `agent_prompts/<role>.md` (front-matter + body) |
+| `internal/agentkit/` | agent bootstrap: load prompt → register → fetch model → serve A2A |
+| `internal/agents/planner/` | the planner agent's identity (role + code-default metadata) |
 | `internal/coordinator/` | the Run state machine + A2A dispatch engine |
 | `internal/prd/` | PRD type + Markdown/JSON parsing |
 | `cmd/` | `catalog`, `coordinator`, `agent-planner` binaries |

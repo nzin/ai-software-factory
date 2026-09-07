@@ -10,8 +10,9 @@ runs a PRD to a plan with a TTL/budget guard.
 
 - [ ] `ui-ux-designer`, `backend-developer`, `frontend-developer`,
       `mobile-developer`, `security-reviewer`, `code-reviewer`.
-- [ ] Each is `agentkit.Bootstrap` + `agentkit.LLMExecutor(client, prompt)` under
-      its own `Role`, with a `cmd/agent-<role>` binary — same shape as
+- [ ] Each is `agentkit.Bootstrap` + `boot.LLMExecutor()` under its own `Role`,
+      with a `cmd/agent-<role>` binary and an `agent_prompts/<role>.md` prompt
+      file (front-matter for name/description/skills) — same shape as
       `internal/agents/planner`.
 - [ ] Add per-role defaults to `modelext.Defaults`.
 - [ ] Reviewers return a **structured verdict** (`approve` |

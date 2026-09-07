@@ -49,11 +49,13 @@ vet:
 ## demo: run the full local stack against a sample PRD
 ## (needs ANTHROPIC_API_KEY, from .env or the environment)
 demo: build
-	@if [ -z "$(ANTHROPIC_API_KEY)" ]; then \
+	@# ANTHROPIC_API_KEY is exported from .env above; reference it via the shell
+	@# ($$VAR) so it never appears in `make -n` output.
+	@if [ -z "$$ANTHROPIC_API_KEY" ]; then \
 		echo "ANTHROPIC_API_KEY is not set. Create a .env file (see .env.example)."; \
 		exit 1; \
 	fi
-	@ANTHROPIC_API_KEY="$(ANTHROPIC_API_KEY)" ./scripts/demo.sh
+	@./scripts/demo.sh
 
 clean:
 	@rm -rf bin *.db /tmp/asf-demo*

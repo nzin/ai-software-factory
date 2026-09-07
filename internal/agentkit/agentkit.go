@@ -15,6 +15,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
+	"github.com/nzin/ai-software-factory/internal/agentprompts"
 	"github.com/nzin/ai-software-factory/internal/llm"
 	"github.com/nzin/ai-software-factory/internal/modelext"
 )
@@ -22,7 +23,8 @@ import (
 // InvokePath is the A2A JSON-RPC endpoint each agent exposes.
 const InvokePath = "/invoke"
 
-// Options configures a single agent.
+// Options configures a single agent. Name / Description / Skills are the code
+// defaults; a matching prompt file's front-matter overrides them.
 type Options struct {
 	Role        string
 	Name        string
@@ -36,6 +38,8 @@ type Options struct {
 	PublicURL string
 	// CatalogURL is the catalog base URL, e.g. "http://127.0.0.1:8080".
 	CatalogURL string
+	// PromptsDir holds <role>.md prompt files (default "agent_prompts").
+	PromptsDir string
 
 	// DefaultModel is sent to the catalog on first registration only.
 	DefaultModel modelext.Config
@@ -43,13 +47,22 @@ type Options struct {
 
 // Bootstrapped is the result of Bootstrap.
 type Bootstrapped struct {
-	Card    *a2a.AgentCard
-	LLM     *llm.Client
-	Model   modelext.Config
-	Catalog *CatalogClient
+	Card         *a2a.AgentCard
+	LLM          *llm.Client
+	Model        modelext.Config
+	Catalog      *CatalogClient
+	SystemPrompt string
 }
 
-// Bootstrap registers the agent and returns everything needed to serve it.
+// LLMExecutor is the standard single-turn executor for this agent, wired to its
+// loaded system prompt.
+func (b *Bootstrapped) LLMExecutor() a2asrv.AgentExecutor {
+	return LLMExecutor(b.LLM, b.SystemPrompt)
+}
+
+// Bootstrap loads the agent's prompt file, registers the agent with the catalog
+// (using prompt front-matter to override the code defaults), fetches the
+// effective model configuration, and returns everything needed to serve it.
 func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 	if opts.DefaultModel.Model == "" {
 		opts.DefaultModel = modelext.Defaults(opts.Role)
@@ -57,6 +70,17 @@ func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
+	if opts.PromptsDir == "" {
+		opts.PromptsDir = "agent_prompts"
+	}
+
+	prompt, err := agentprompts.Load(opts.PromptsDir, opts.Role)
+	if err != nil {
+		return nil, err
+	}
+	meta := mergeMeta(opts, prompt)
+	log.Printf("agentkit: %q prompt loaded from %s (%d bytes)",
+		meta.Name, opts.PromptsDir+"/"+opts.Role+".md", len(prompt.System))
 
 	cc, err := NewCatalogClient(opts.CatalogURL)
 	if err != nil {
@@ -65,11 +89,11 @@ func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 
 	if err := cc.Register(ctx, Registration{
 		Role:         opts.Role,
-		Name:         opts.Name,
-		Description:  opts.Description,
+		Name:         meta.Name,
+		Description:  meta.Description,
 		BaseURL:      opts.PublicURL,
 		Transport:    "JSONRPC",
-		Skills:       opts.Skills,
+		Skills:       meta.Skills,
 		Concurrency:  opts.Concurrency,
 		DefaultModel: opts.DefaultModel,
 	}); err != nil {
@@ -81,13 +105,49 @@ func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 		return nil, err
 	}
 
-	card := buildCard(opts, model)
+	card := buildCard(meta, opts.PublicURL, model)
 	return &Bootstrapped{
-		Card:    card,
-		LLM:     llm.New(model),
-		Model:   model,
-		Catalog: cc,
+		Card:         card,
+		LLM:          llm.New(model),
+		Model:        model,
+		Catalog:      cc,
+		SystemPrompt: prompt.System,
 	}, nil
+}
+
+// meta is the resolved agent identity after merging code defaults with prompt
+// front-matter.
+type meta struct {
+	Role        string
+	Name        string
+	Description string
+	Skills      []string
+}
+
+// mergeMeta layers prompt front-matter over the Options code defaults
+// (front-matter wins; empty front-matter fields fall back).
+func mergeMeta(opts Options, p *agentprompts.Prompt) meta {
+	m := meta{
+		Role:        opts.Role,
+		Name:        opts.Name,
+		Description: opts.Description,
+		Skills:      opts.Skills,
+	}
+	if p != nil {
+		if p.Name != "" {
+			m.Name = p.Name
+		}
+		if p.Description != "" {
+			m.Description = p.Description
+		}
+		if len(p.Skills) > 0 {
+			m.Skills = p.Skills
+		}
+	}
+	if m.Name == "" {
+		m.Name = opts.Role
+	}
+	return m
 }
 
 // Serve runs the agent's A2A JSON-RPC server until ctx is cancelled.
@@ -116,20 +176,20 @@ func Serve(ctx context.Context, addr string, card *a2a.AgentCard, exec a2asrv.Ag
 	return nil
 }
 
-func buildCard(opts Options, model modelext.Config) *a2a.AgentCard {
+func buildCard(m meta, publicURL string, model modelext.Config) *a2a.AgentCard {
 	skill := a2a.AgentSkill{
-		ID:          opts.Role,
-		Name:        opts.Name,
-		Description: opts.Description,
-		Tags:        opts.Skills,
+		ID:          m.Role,
+		Name:        m.Name,
+		Description: m.Description,
+		Tags:        m.Skills,
 	}
 	if len(skill.Tags) == 0 {
-		skill.Tags = []string{opts.Role}
+		skill.Tags = []string{m.Role}
 	}
-	invoke := strings.TrimRight(opts.PublicURL, "/") + InvokePath
+	invoke := strings.TrimRight(publicURL, "/") + InvokePath
 	return &a2a.AgentCard{
-		Name:        opts.Name,
-		Description: opts.Description,
+		Name:        m.Name,
+		Description: m.Description,
 		Version:     "0.1.0",
 		SupportedInterfaces: []*a2a.AgentInterface{
 			a2a.NewAgentInterface(invoke, a2a.TransportProtocolJSONRPC),

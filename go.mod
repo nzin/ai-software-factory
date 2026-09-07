@@ -21,6 +21,7 @@ require (
 	github.com/go-swagger/go-swagger v0.36.5
 	github.com/google/uuid v1.6.0
 	github.com/jessevdk/go-flags v1.6.1
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.58.0
 	gorm.io/gorm v1.31.2
 )
@@ -88,7 +89,6 @@ require (
 	go.opentelemetry.io/otel v1.45.0 // indirect
 	go.opentelemetry.io/otel/metric v1.45.0 // indirect
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/mod v0.40.0 // indirect

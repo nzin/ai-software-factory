@@ -46,18 +46,25 @@ default is ignored and an operator overrides via
 
 `internal/agentkit` is the shared bootstrap every specialized agent uses:
 
-1. `Register` — idempotent `PUT /v1/agents/{role}` with the base registration and
+1. `agentprompts.Load(dir, role)` — read `agent_prompts/<role>.md` from disk
+   (hard error if missing); split optional YAML front-matter
+   (`name`/`description`/`skills`) from the prompt body.
+2. `mergeMeta` — front-matter overrides the code-default identity, field by field.
+3. `Register` — idempotent `PUT /v1/agents/{role}` with the merged identity and
    default model.
-2. `GetModel` — fetch the effective `modelext.Config` back.
-3. build the local `a2a.AgentCard` (model extension from the effective config),
+4. `GetModel` — fetch the effective `modelext.Config` back.
+5. build the local `a2a.AgentCard` (model extension from the effective config),
    construct an `llm.Client`.
-4. `Serve` — `a2asrv.NewHandler(executor)` behind
+6. `Serve` — `a2asrv.NewHandler(executor)` behind
    `mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(...))` +
    `NewStaticAgentCardHandler`.
 
 `LLMExecutor(client, systemPrompt)` is the executor every role agent shares: read
 the text parts of the incoming message, run one Claude turn, yield the response
-as one terminal agent message. Roles differ only in prompt and model config.
+as one terminal agent message. Roles differ only in their `agent_prompts/<role>.md`
+file and their catalog-owned model config; `internal/agents/<role>` holds just the
+role key and the code-default identity. Editing a prompt file needs only a restart
+of that agent — no rebuild, no code change.
 
 ### Coordinator
 
