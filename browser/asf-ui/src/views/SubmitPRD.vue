@@ -33,7 +33,7 @@ const repoHint = computed(() => {
   if (/^(https?|ssh|git):\/\//.test(v) || /^[^/]+@[^/]+:/.test(v)) {
     return 'Remote: cloned, the work branch is pushed, and a GitHub PR is opened when GITHUB_TOKEN is set.'
   }
-  return 'Local: a `git worktree` is added to that repo, so the asf/run-… branch lands there ready to merge.'
+  return 'Local: cloned from that repo; the asf/run-… branch is pushed back to it when the run finishes.'
 })
 
 async function submit() {

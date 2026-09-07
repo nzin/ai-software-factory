@@ -76,7 +76,7 @@ only a restart of that agent — no rebuild, no code change.
 
 Accepts a PRD + a `repoURL` (`api/coordinator.swagger.yml`), resolves a per-run
 workspace (`internal/workspace`, `workspace/<runId>/repo` — a new `git init`
-repo, a `git worktree` of an existing local repo, or a clone of a remote), and
+repo, a clone of an existing local repo, or a clone of a remote), and
 drives a `Run` through the loop (`internal/coordinator/coordinator.go` `drive`,
 stage order in `plan.go`, A2A dispatch in `pipeline.go`):
 
@@ -120,11 +120,20 @@ planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mo
   `WithMaxStageIterations` (default 3) attempts on one role → `needs_human_review`.
 - On finish: `HasCommits` uses `merge-base(base, HEAD)..HEAD`. A remote clone
   gets `git push` + a GitHub PR (`internal/forge`, `GITHUB_TOKEN`) →
-  `pr_open`/`prURL`, else `pr_ready`; a local worktree / new repo →
+  `pr_open`/`prURL`, else `pr_ready`. A local-repo run pushes its branch back
+  to the `file://` origin and ends at `pr_ready`; a brand-new repo ends at
   `pr_ready` naming the branch.
 
-Agents in docker-compose share the workspace through a named volume
-(`factory-workspace:/workspace`); the envelope carries absolute paths.
+Agents in docker-compose share the per-run checkout through the
+`factory-workspace` named volume, mounted at `/workspace` in the coordinator and
+every agent; the envelope carries absolute container paths. Those checkouts are
+disposable. The coordinator additionally bind-mounts `./local_git` (at
+`/var/lib/asf/local_git`) and treats it as a **git remote**: for a local-repo run
+it `git clone`s from `./local_git` into `factory-workspace/<runID>/repo` and, on
+finish, `git push`es the `asf/run-<id>` branch back. `make up` seeds the shared
+repo `./local_git/project` that empty-`repoURL` runs clone (`ASF_DEFAULT_REPO` /
+`coordinator.WithDefaultRepo`), instead of scaffolding a throwaway repo per run —
+so the produced branches persist on the host while the working trees do not.
 
 ## Run lifecycle, TTL, and human review
 
@@ -133,7 +142,7 @@ Agents in docker-compose share the workspace through a named volume
 ```
 queued → running ⇄ awaiting_approval          (planner gate; approve / reject)
    running → pr_open   (remote: branch pushed + GitHub PR opened)
-   running → pr_ready  (local worktree / new repo: branch ready to merge)
+   running → pr_ready  (local repo: branch pushed back; new repo: branch ready)
    running → done      (no commits were produced)
    running → needs_human_review   (budget spent, or a role fails review 3×,
                                    or the coordinator restarted mid-run)
@@ -232,7 +241,7 @@ returns `202` immediately and the run drives on a background goroutine.
   global `--max-runs` cap is still ahead.
 - `Run` state is persisted through `coordinator.Store` (SQLite via `runstore`);
   crash-resume is `Recover()`. A worker pool, at-least-once dispatch, and
-  multi-replica agents via `a2a-go` cluster mode are Phase 6.
+  multi-replica agents via `a2a-go` cluster mode are Phase 7.
 
 ## Web UI
 
@@ -266,7 +275,7 @@ than failing if the catalog is slow.
 timeline, the per-step record, the plan, the findings and the raw JSON, plus an
 action bar that switches on status (approve/reject · resume/abandon ·
 accept/request-changes); a submit-PRD form; and the A2A catalog roster with a
-per-agent card view. Updates are by polling — SSE is Phase 6.
+per-agent card view. Updates are by polling — SSE is Phase 7.
 
 ## Code generation
 

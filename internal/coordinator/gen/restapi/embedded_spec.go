@@ -890,7 +890,7 @@ func init() {
           "$ref": "#/definitions/PRD"
         },
         "repoURL": {
-          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (worked on via git worktree). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
           "type": "string"
         }
       }
@@ -1824,7 +1824,7 @@ func init() {
           "$ref": "#/definitions/PRD"
         },
         "repoURL": {
-          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (worked on via git worktree). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
           "type": "string"
         }
       }

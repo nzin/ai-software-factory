@@ -11,7 +11,7 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
 > the coordinator loop with a **feedback loop** (reviewers and the build gate
 > route `request_changes` back to a developer until they pass or a per-stage cap
 > trips), a **human approval gate** after planning, **real git repositories**
-> (new / local worktree / remote clone + push + GitHub PR), a **build/test gate**
+> (new / local clone + push / remote clone + push + GitHub PR), a **build/test gate**
 > that compiles and tests every commit before the reviewers see it, a **GitHub
 > PR-review webhook** that re-enters the factory when someone reviews the PR,
 > **durable async runs** with a per-run event log, and a **web UI** at
@@ -30,7 +30,7 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
              │            └── request_changes / build_failed ┘         by catalog)
              │                 (back to a dev, bounded by a per-role attempt cap)
              ▼
-       per-run workspace  (new repo / `git worktree` of a local repo / clone of a
+       per-run workspace  (new repo / clone of a local repo / clone of a
        remote) on branch asf/run-<id>; on finish: push + open a PR, or pr_ready.
        A GitHub PR review webhooks back in as another request_changes round.
 ```
@@ -51,7 +51,7 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
   and survive a coordinator restart.
 - **agents** — A2A agents built on `internal/agentkit` (register with the
   catalog, fetch model config, serve `/.well-known/agent-card.json` + `/invoke`).
-  Developers write files into the worktree; **`build-gate`** (`internal/buildgate`,
+  Developers write files into the checkout; **`build-gate`** (`internal/buildgate`,
   no LLM) runs `go build`/`go test` and `npm run build` and bounces a broken
   commit back to its author; `security-reviewer` runs SAST (gosec / govulncheck /
   `npm audit`) plus an LLM pass; `code-reviewer` shells
@@ -154,7 +154,7 @@ make up                 # build images + start catalog, coordinator, all 8 agent
                         # -> web UI at http://localhost:8090
 make kodus-up           # optional: self-hosted Kodus (then scripts/kodus-setup.md)
 
-# submit a PRD (repoURL: "" scaffolds a brand-new local repo in the workspace)
+# submit a PRD (repoURL: "" branches off the shared ./local_git/project repo)
 RUN=$(curl -s -XPOST localhost:8090/v1/prd -H 'content-type: application/json' \
   -d "$(jq -Rs '{markdown: ., repoURL: ""}' docs/sample-prd.md)" | jq -r .id)
 
@@ -162,13 +162,21 @@ RUN=$(curl -s -XPOST localhost:8090/v1/prd -H 'content-type: application/json' \
 curl -s localhost:8090/v1/runs/$RUN | jq '{status, stage, reason}'
 curl -s -XPOST localhost:8090/v1/runs/$RUN/approve | jq '{status, stage}'
 
-# inspect a run's workspace
-docker compose exec coordinator ls -R /workspace
+# inspect the branch a run produced (pushed back to the local_git remote)
+git -C local_git/project log --oneline asf/run-<id>
 make down
 ```
 
+`./local_git` is bind-mounted into the coordinator as a **git remote**: each run
+is `git clone`d from it into the throwaway `factory-workspace` volume, and the
+`asf/run-<id>` branch is **pushed back** to `./local_git` when the run finishes.
+So the working trees are disposable but the branches persist on the host — browse
+them with `git -C local_git/project log asf/run-<id>` (a normal checkout, no
+worktree quirks). `make up` seeds the shared repo `./local_git/project` that
+empty-`repoURL` runs clone; `make reset-workspace` wipes `./local_git`.
+
 To target an existing repo, pass `repoURL`: a local path / `file:///abs/path`
-(the `asf/run-<id>` branch is added to that repo via `git worktree`), or an
+(cloned from, and the `asf/run-<id>` branch pushed back to it), or an
 `https://github.com/...` URL (cloned; branch pushed and a PR opened when
 `GITHUB_TOKEN` is set). With `GITHUB_WEBHOOK_SECRET` set and a webhook wired
 (see [scripts/github-webhook.md](scripts/github-webhook.md)), a review left on
@@ -214,7 +222,7 @@ curl -s -X PATCH localhost:8080/v1/agents/backend-developer/model \
 | `internal/agentprompts/` | loads `agent_prompts/<role>.md` (front-matter + body) |
 | `internal/agentkit/` | agent bootstrap + `Run` (standard agent main) + executors (`LLMExecutor`, `DispatchExecutor`) |
 | `internal/factory/` | A2A message contracts + plan/verdict/routing helpers (`ParsePlan`, `RouteRole`, `VerdictFor`) shared by coordinator + agents |
-| `internal/workspace/` | per-run repositories: new / `git worktree` of a local repo / clone of a remote (`Manager.Prepare`, `Repo`) |
+| `internal/workspace/` | per-run repositories: new / clone of a local repo / clone of a remote, branch pushed back (`Manager.Prepare`, `Repo`) |
 | `internal/forge/` | opens a GitHub PR for a pushed branch (`GITHUB_TOKEN`), and verifies + parses PR-review webhooks (`webhook.go`) |
 | `internal/buildgate/` | `go build`/`go test` + `npm run build` over the workspace → routed `Finding`s |
 | `internal/kodus/` | Kodus CLI wrapper |

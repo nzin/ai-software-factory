@@ -21,7 +21,11 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/...
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ # The per-run workspace is a bind-mount of a host repo owned by the host user;
+ # containers run as root, so git 2.35+ would otherwise refuse it as "dubious
+ # ownership".
+ && git config --system --add safe.directory '*'
 WORKDIR /app
 COPY --from=build /out/ /app/bin/
 COPY agent_prompts/ /app/agent_prompts/

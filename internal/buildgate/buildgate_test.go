@@ -36,7 +36,7 @@ func TestCheckCleanModule(t *testing.T) {
 	write(t, dir, "add.go", "package clean\n\nfunc Add(a, b int) int { return a + b }\n")
 	write(t, dir, "add_test.go", "package clean\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(2, 3) != 5 {\n\t\tt.Fatal(\"bad\")\n\t}\n}\n")
 
-	res := Check(context.Background(), "run-test", dir)
+	res := Check(context.Background(), "run-test", dir, nil)
 	findings, summary := res.Findings, res.Summary
 	for _, f := range findings {
 		if f.Severity == "high" {
@@ -58,7 +58,7 @@ func TestCheckCompileError(t *testing.T) {
 	// references an undefined symbol
 	write(t, dir, "bad.go", "package broken\n\nfunc Use() int { return missing() }\n")
 
-	findings := Check(context.Background(), "run-test", dir).Findings
+	findings := Check(context.Background(), "run-test", dir, nil).Findings
 	if factory.VerdictFor(findings) != factory.VerdictRequestChanges {
 		t.Fatalf("verdict = %s, want request_changes", factory.VerdictFor(findings))
 	}
@@ -87,7 +87,7 @@ func TestCheckFailingTest(t *testing.T) {
 	write(t, dir, "x.go", "package failtest\n\nfunc One() int { return 1 }\n")
 	write(t, dir, "x_test.go", "package failtest\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tif One() != 2 {\n\t\tt.Fatal(\"expected 2\")\n\t}\n}\n")
 
-	findings := Check(context.Background(), "run-test", dir).Findings
+	findings := Check(context.Background(), "run-test", dir, nil).Findings
 	if factory.VerdictFor(findings) != factory.VerdictRequestChanges {
 		t.Fatalf("a failing test should bounce the run: %+v", findings)
 	}
@@ -99,7 +99,7 @@ func TestCheckNoToolchain(t *testing.T) {
 	// Empty PATH so neither `go` nor `npm` resolves.
 	t.Setenv("PATH", "")
 
-	res := Check(context.Background(), "run-test", dir)
+	res := Check(context.Background(), "run-test", dir, nil)
 	findings, summary := res.Findings, res.Summary
 	if len(findings) != 1 || findings[0].Severity != "info" {
 		t.Fatalf("want one info finding, got %+v", findings)
@@ -118,7 +118,7 @@ func TestCheckReportsFailuresForTheLLM(t *testing.T) {
 	write(t, dir, "go.mod", "module example.com/broken\n\ngo 1.22\n")
 	write(t, dir, "bad.go", "package broken\n\nfunc Use() int { return missing() }\n")
 
-	res := Check(context.Background(), "run-test", dir)
+	res := Check(context.Background(), "run-test", dir, nil)
 	if len(res.Failures) == 0 {
 		t.Fatal("Check should hand the raw failure output to the caller for the LLM pass")
 	}
@@ -129,7 +129,7 @@ func TestCheckReportsFailuresForTheLLM(t *testing.T) {
 	clean := t.TempDir()
 	write(t, clean, "go.mod", "module example.com/clean\n\ngo 1.22\n")
 	write(t, clean, "a.go", "package clean\n\nfunc A() int { return 1 }\n")
-	if fs := Check(context.Background(), "run-test", clean).Failures; len(fs) != 0 {
+	if fs := Check(context.Background(), "run-test", clean, nil).Failures; len(fs) != 0 {
 		t.Fatalf("clean module reported failures: %+v", fs)
 	}
 }
@@ -143,7 +143,7 @@ func TestCheckMissingComposeForAService(t *testing.T) {
 	write(t, dir, "go.mod", "module example.com/svc\n\ngo 1.22\n")
 	write(t, dir, "main.go", "package main\n\nfunc main() {}\n")
 
-	res := Check(context.Background(), "run-test", dir)
+	res := Check(context.Background(), "run-test", dir, nil)
 	var deploy *factory.Finding
 	for i := range res.Findings {
 		if res.Findings[i].Category == "deploy" {
@@ -165,7 +165,7 @@ func TestCheckNoComposeCheckForALibrary(t *testing.T) {
 	write(t, dir, "go.mod", "module example.com/lib\n\ngo 1.22\n")
 	write(t, dir, "lib.go", "package lib\n\nfunc F() int { return 1 }\n")
 
-	for _, f := range Check(context.Background(), "run-test", dir).Findings {
+	for _, f := range Check(context.Background(), "run-test", dir, nil).Findings {
 		if f.Category == "deploy" || f.Category == "component-test" {
 			t.Fatalf("a library must not get a deploy/component finding: %+v", f)
 		}
@@ -187,3 +187,24 @@ func TestRouteByPath(t *testing.T) {
 		}
 	}
 }
+
+func TestIsCodeChange(t *testing.T) {
+	cases := []struct {
+		name    string
+		changed []string
+		want    bool
+	}{
+		{"nil (undiffable) runs the checks", nil, true},
+		{"docs only", []string{"README.md", "docs/spec.md"}, false},
+		{"a source file", []string{"docs/x.md", "internal/api/handlers.go"}, true},
+		{"a manifest", []string{"go.mod"}, true},
+		{"a compose file", []string{"docker-compose.test.yml"}, true},
+		{"empty slice", []string{}, false},
+	}
+	for _, tc := range cases {
+		if got := isCodeChange(tc.changed); got != tc.want {
+			t.Errorf("%s: isCodeChange(%v) = %v, want %v", tc.name, tc.changed, got, tc.want)
+		}
+	}
+}
+

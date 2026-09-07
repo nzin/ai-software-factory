@@ -6,6 +6,12 @@
 #                    # via KODUS_API_URL (default http://host.docker.internal:3001)
 #
 # Requires ANTHROPIC_API_KEY in .env (see .env.example).
+#
+# Per-run working trees live in the `factory-workspace` named volume and are
+# disposable. `./local_git` is bind-mounted into the coordinator as a git remote:
+# the factory clones a target repo from it and pushes the `asf/run-<id>` branch
+# back, so only real history persists on the host. `make up` creates the shared
+# repo ./local_git/project that empty-repoURL runs clone.
 
 name: ai-software-factory
 
@@ -48,11 +54,17 @@ services:
     ports: ["8090:8090"]
     volumes:
       - factory-workspace:/workspace
+      # local_git is a git remote, not a workspace: the coordinator clones from it
+      # and pushes run branches back. Only the coordinator needs it.
+      - ./local_git:/var/lib/asf/local_git
       - coordinator-data:/data
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
       ASF_CATALOG_URL: http://catalog:8080
       ASF_WORKSPACE_ROOT: /workspace
+      # A PRD submitted with an empty repoURL is cloned from this shared repo
+      # (created by `make up`) instead of scaffolding a throwaway one.
+      ASF_DEFAULT_REPO: /var/lib/asf/local_git/project
       ASF_RUNSTORE: /data/runs.db
       ASF_BASE_BRANCH: ${ASF_BASE_BRANCH:-main}
       # Optional: open a GitHub PR when a run targets a github.com remote.

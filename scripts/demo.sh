@@ -27,6 +27,9 @@ fi
 
 PRD="${1:-docs/sample-prd.md}"
 DB="/tmp/asf-demo.db"
+# Host-mode demo: a throwaway workspace under /tmp, and repoURL "" scaffolds a
+# brand-new repo. `make up` (compose) instead clones each run from the ./local_git
+# remote and pushes the branch back.
 WS="/tmp/asf-demo-workspace"
 rm -rf "$DB" "$WS"
 

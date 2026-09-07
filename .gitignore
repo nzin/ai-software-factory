@@ -6,8 +6,10 @@
 /browser/*/node_modules/
 coverage.txt
 
-# per-run git worktrees, and the cloned Kodus installer
+# per-run git worktrees, the persistent local factory workspace (generated
+# projects + their git history), and the cloned Kodus installer
 /workspace/
+/local_git/
 /.kodus/
 
 # local secrets / scratch (never commit)

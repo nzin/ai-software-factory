@@ -163,10 +163,13 @@ func cmdServe(args []string) {
 	deadline := fs.Duration("deadline", coordinator.DefaultDeadline, "default per-run wall-clock budget")
 	uiDir := fs.String("ui-dir", envOr("ASF_UI_DIR", "browser/asf-ui/dist"),
 		"built Vue SPA to serve at / (skipped when it has no index.html)")
+	defaultRepo := fs.String("default-repo", envOr("ASF_DEFAULT_REPO", ""),
+		"repo a submission targets when its repoURL is empty (default: scaffold a throwaway repo)")
 	_ = fs.Parse(args)
 
 	orch := newOrchestrator(*catalogURL, *wsRoot, *store, *baseBranch,
-		coordinator.WithDefaults(*budget, *deadline))
+		coordinator.WithDefaults(*budget, *deadline),
+		coordinator.WithDefaultRepo(*defaultRepo))
 
 	// Must happen before ConfigureAPI, which builds the middleware stack.
 	ui.SetDir(*uiDir)

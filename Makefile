@@ -15,7 +15,7 @@ KODUS_DIR := .kodus
 
 UI_DIR := browser/asf-ui
 
-.PHONY: all gen build build_ui run_ui test test_ui vet demo tools clean up down logs compose-build kodus-up kodus-down
+.PHONY: all gen build build_ui run_ui test test_ui vet demo tools clean up down logs compose-build local-git reset-workspace kodus-up kodus-down
 
 all: gen build_ui build test
 
@@ -81,15 +81,29 @@ compose-build:
 	@docker build -t ai-software-factory-base:latest -f Dockerfile .
 	@docker compose build
 
+## local-git: create the shared repo that empty-repoURL runs clone (and push back to)
+local-git:
+	@mkdir -p local_git/project
+	@test -d local_git/project/.git || ( cd local_git/project \
+		&& git init -q -b main \
+		&& git config user.email "factory@local" \
+		&& git config user.name "AI Software Factory" \
+		&& git commit -q --allow-empty -m "chore: base" )
+
 ## up: build + start the factory (catalog, coordinator, all agents)
-up: compose-build
+up: compose-build local-git
 	@docker compose up -d
 	@echo "web UI:      http://localhost:8090"
 	@echo "coordinator: http://localhost:8090   catalog: http://localhost:8080"
+	@echo "local_git:   ./local_git  (the git remote runs push their branches to)"
 
 ## down: stop the factory
 down:
 	@docker compose down
+
+## reset-workspace: delete the local_git remote and every branch runs pushed to it
+reset-workspace:
+	@rm -rf local_git
 
 logs:
 	@docker compose logs -f --tail=100
@@ -115,5 +129,6 @@ kodus-up:
 kodus-down:
 	@cd $(KODUS_DIR) && docker compose down
 
+## clean: remove build output (keeps ./local_git — use `make reset-workspace` for that)
 clean:
 	@rm -rf bin *.db /tmp/asf-demo* workspace $(UI_DIR)/dist

@@ -109,7 +109,7 @@ func fixtureRepo(t *testing.T, ctx context.Context) string {
 	return dir
 }
 
-func TestPrepareLocalRepoUsesWorktree(t *testing.T) {
+func TestPrepareLocalRepoClonesAndPushesBack(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -128,9 +128,16 @@ func TestPrepareLocalRepoUsesWorktree(t *testing.T) {
 		t.Fatalf("source = %q, want %q", repo.Source, src)
 	}
 
-	// The work branch lives in the user's own repo.
-	if out, _ := git(ctx, src, "branch", "--list", "asf/run-wt-1"); !strings.Contains(out, "asf/run-wt-1") {
-		t.Fatalf("work branch not in source repo: %q", out)
+	// It's a clone: a real origin pointing back at the source, not a worktree.
+	if out, _ := git(ctx, repo.Dir, "remote", "get-url", "origin"); strings.TrimSpace(out) != "file://"+src {
+		t.Fatalf("origin = %q, want file://%s", strings.TrimSpace(out), src)
+	}
+	if fi, err := os.Stat(filepath.Join(repo.Dir, ".git")); err != nil || !fi.IsDir() {
+		t.Fatalf(".git should be a real dir in a clone: %v", err)
+	}
+	// The work branch does NOT exist in the source until it is pushed.
+	if out, _ := git(ctx, src, "branch", "--list", "asf/run-wt-1"); strings.Contains(out, "asf/run-wt-1") {
+		t.Fatalf("branch leaked into source before push: %q", out)
 	}
 
 	if _, err := repo.WriteFiles(map[string]string{"new.txt": "new\n"}); err != nil {
@@ -149,7 +156,22 @@ func TestPrepareLocalRepoUsesWorktree(t *testing.T) {
 		t.Fatalf("changed files = %v, want [new.txt] only", files)
 	}
 
-	// Cleanup unregisters the worktree; the branch survives in the source repo.
+	// Reopening the checkout rediscovers origin, so a coordinator-side Push works.
+	reopened, err := Open(ctx, repo.Dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if reopened.Remote != "file://"+src {
+		t.Fatalf("Open lost the remote: %q", reopened.Remote)
+	}
+	if err := reopened.Push(ctx); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if out, _ := git(ctx, src, "branch", "--list", "asf/run-wt-1"); !strings.Contains(out, "asf/run-wt-1") {
+		t.Fatalf("branch not in source after push: %q", out)
+	}
+
+	// Cleanup is just a directory removal now.
 	if err := m.Remove(ctx, "wt-1", repo); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
@@ -157,7 +179,7 @@ func TestPrepareLocalRepoUsesWorktree(t *testing.T) {
 		t.Fatalf("workspace dir still present: %v", err)
 	}
 	if out, _ := git(ctx, src, "branch", "--list", "asf/run-wt-1"); !strings.Contains(out, "asf/run-wt-1") {
-		t.Fatalf("branch should survive cleanup: %q", out)
+		t.Fatalf("pushed branch should survive cleanup: %q", out)
 	}
 }
 

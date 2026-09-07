@@ -64,6 +64,7 @@ type Orchestrator struct {
 	deadline        time.Duration
 	maxStageIter    int
 	baseBranch      string
+	defaultRepo     string // used when a submission leaves RepoURL empty
 	pruneKeep       int
 
 	mu      sync.Mutex
@@ -79,6 +80,11 @@ func WithStore(s Store) Option                  { return func(o *Orchestrator) {
 func WithCatalog(c CatalogReader) Option        { return func(o *Orchestrator) { o.catalog = c } }
 func WithMaxStageIterations(n int) Option       { return func(o *Orchestrator) { o.maxStageIter = n } }
 func WithBaseBranch(b string) Option            { return func(o *Orchestrator) { o.baseBranch = b } }
+
+// WithDefaultRepo sets the repo a submission targets when its RepoURL is empty
+// (instead of scaffolding a throwaway repo). Used for the local persistent
+// workspace, where empty-repoURL runs branch off a shared repo.
+func WithDefaultRepo(url string) Option { return func(o *Orchestrator) { o.defaultRepo = url } }
 
 // WithDefaults overrides the default per-run budget.
 func WithDefaults(iterationBudget int, deadline time.Duration) Option {
@@ -180,6 +186,10 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 	if base == "" {
 		base = o.baseBranch
 	}
+	repoURL := opts.RepoURL
+	if repoURL == "" {
+		repoURL = o.defaultRepo
+	}
 
 	run := &Run{
 		ID:         uuid.NewString(),
@@ -188,7 +198,7 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 		Status:     StatusRunning,
 		Stage:      planner.Role,
 		Budget:     Budget{IterationsRemaining: iters, Deadline: deadline},
-		RepoURL:    opts.RepoURL,
+		RepoURL:    repoURL,
 		BaseBranch: base,
 		Attempts:   map[string]int{},
 		CreatedAt:  now,
@@ -196,7 +206,7 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 	}
 
 	if o.workspace != nil {
-		ref := workspace.ParseRepoURL(opts.RepoURL, base)
+		ref := workspace.ParseRepoURL(repoURL, base)
 		repo, err := o.workspace.Prepare(context.Background(), run.ID, ref)
 		if err != nil {
 			return nil, fmt.Errorf("coordinator: prepare workspace: %w", err)
@@ -692,14 +702,12 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 	}
 
 	switch run.RepoKind {
-	case string(workspace.KindRemote):
+	case string(workspace.KindRemote), string(workspace.KindLocal):
 		if err := repo.Push(ctx); err != nil {
-			// The clone-fallback for a local repo has no reachable origin; treat
-			// a push failure there as "branch ready locally".
 			o.stop(run, StatusPRReady, "commits ready on "+run.WorkBranch+" (push failed: "+err.Error()+")")
 			return
 		}
-		o.event(run, EventPushed, "", "branch %s pushed to origin", run.WorkBranch)
+		o.event(run, EventPushed, "", "branch %s pushed to %s", run.WorkBranch, run.RepoURL)
 
 		// A run coming back from human review already has a PR; re-opening it
 		// would 422 and silently demote the run to pr_ready.
@@ -707,18 +715,20 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 			o.stop(run, StatusPROpen, "PR updated: "+run.PRURL)
 			return
 		}
+		// OpenPR is a no-op ("", nil) for a file:// / non-GitHub origin, so the
+		// local-repo case falls straight through to pr_ready.
 		if url, _ := forge.OpenPR(ctx, run.RepoURL, run.BaseBranch, run.WorkBranch, run.PRD.Title, run.Plan); url != "" {
 			run.PRURL = url
 			o.event(run, EventPROpened, "", "pull request opened: %s", url)
 			o.stop(run, StatusPROpen, "PR opened: "+url)
 			return
 		}
-		o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" pushed to origin")
-
-	case string(workspace.KindLocal):
-		src := run.RepoURL
-		o.stop(run, StatusPRReady,
-			fmt.Sprintf("branch %s ready in %s — `git merge %s`", run.WorkBranch, src, run.WorkBranch))
+		if run.RepoKind == string(workspace.KindLocal) {
+			o.stop(run, StatusPRReady, fmt.Sprintf(
+				"branch %s pushed to %s — `git checkout %s`", run.WorkBranch, run.RepoURL, run.WorkBranch))
+		} else {
+			o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" pushed to origin")
+		}
 
 	default: // new
 		o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" in "+run.WorkspaceDir)

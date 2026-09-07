@@ -1,8 +1,9 @@
 // Package workspace manages the per-run working directory that developer agents
-// write into and reviewers inspect. A run targets a repository (local or remote,
-// or a brand-new one); the workspace is where that repo is checked out on a
-// per-run branch. In docker-compose the Root is a shared named volume mounted in
-// the coordinator and every agent.
+// write into and reviewers inspect. A run targets a repository (an existing
+// local one, a remote, or a brand-new one); the workspace is a fresh checkout on
+// a per-run branch. In docker-compose the Root is a shared named volume mounted
+// in the coordinator and every agent; the run's branch is pushed back to its
+// origin (a bind-mounted local repo, or a real remote) when the run finishes.
 package workspace
 
 import (
@@ -24,7 +25,7 @@ type Kind string
 
 const (
 	KindNew    Kind = "new"    // brand-new local repo (git init)
-	KindLocal  Kind = "local"  // linked worktree of an existing local repo
+	KindLocal  Kind = "local"  // clone of an existing local repo (branch pushed back)
 	KindRemote Kind = "remote" // clone of a remote repo
 )
 
@@ -135,18 +136,14 @@ func (m *Manager) Prepare(ctx context.Context, runID string, ref RepoRef) (*Repo
 	case KindLocal:
 		src, _ := localPath(ref.URL)
 		src, _ = filepath.Abs(src)
-		// A worktree keeps the branch in the user's own repo. Fall back to a
-		// file:// clone if `worktree add` refuses (e.g. a bare source).
-		if _, err := git(ctx, src, "worktree", "add", "-b", branch, dir, ref.BaseBranch); err != nil {
-			if err := cloneInto(ctx, "file://"+src, dir, ref.BaseBranch, branch); err != nil {
-				return nil, fmt.Errorf("workspace: local repo %s: worktree and clone both failed: %w", src, err)
-			}
-			repo.Kind = KindRemote
-			repo.Remote = "file://" + src
-		} else {
-			repo.Kind = KindLocal
-			repo.Source = src
+		// Clone (not worktree): the checkout gets a normal .git dir that resolves
+		// on the host too, and the run's branch is pushed back to src on finish.
+		if err := cloneInto(ctx, "file://"+src, dir, ref.BaseBranch, branch); err != nil {
+			return nil, fmt.Errorf("workspace: local repo %s: clone failed: %w", src, err)
 		}
+		repo.Kind = KindLocal
+		repo.Remote = "file://" + src
+		repo.Source = src
 		if err := repo.configIdentity(ctx); err != nil {
 			return nil, err
 		}
@@ -190,18 +187,15 @@ func runAll(ctx context.Context, dir string, steps [][]string, mkdir bool) error
 	return nil
 }
 
-// Remove tears down a run's workspace, unregistering a worktree if needed.
+// Remove tears down a run's workspace. Every kind is now a plain checkout
+// (git init or clone), so removing the directory is all that's needed.
 func (m *Manager) Remove(ctx context.Context, runID string, repo *Repo) error {
-	if repo != nil && repo.Kind == KindLocal && repo.Source != "" {
-		_, _ = git(ctx, repo.Source, "worktree", "remove", "--force", m.RepoDir(runID))
-	}
 	return os.RemoveAll(filepath.Join(m.Root, runID))
 }
 
-// Prune keeps the newest `keep` run directories and removes the rest. Worktree
-// registrations for pruned runs are best-effort cleaned by callers that still
-// hold the Repo; a bare `rm -rf` here can leave a stale registration, which
-// `git worktree prune` in the source repo clears.
+// Prune keeps the newest `keep` run directories and removes the rest. Each run
+// directory is a self-contained checkout (git init or clone), so a plain
+// `rm -rf` is a complete teardown.
 func (m *Manager) Prune(keep int) error {
 	entries, err := os.ReadDir(m.Root)
 	if err != nil {
@@ -250,6 +244,11 @@ func Open(ctx context.Context, dir string) (*Repo, error) {
 	}
 	head, _ := git(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	r := &Repo{Dir: dir, WorkBranch: strings.TrimSpace(head), BaseBranch: "main"}
+	// A cloned workspace (KindLocal / KindRemote) has an origin; recording it here
+	// is what lets finish() push the branch back — Open is all it has to go on.
+	if out, err := git(ctx, dir, "remote", "get-url", "origin"); err == nil && strings.TrimSpace(out) != "" {
+		r.Remote = strings.TrimSpace(out)
+	}
 	return r, nil
 }
 
@@ -418,9 +417,10 @@ func (r *Repo) Summarize(ctx context.Context, maxFiles int) Summary {
 	return s
 }
 
-// Push pushes the work branch to origin. No-op unless the run cloned a remote.
+// Push pushes the work branch to origin. No-op for a brand-new repo, which has
+// no origin (a clone of a local or remote repo does).
 func (r *Repo) Push(ctx context.Context) error {
-	if r.Kind != KindRemote || r.Remote == "" {
+	if r.Remote == "" {
 		return nil
 	}
 	if out, err := git(ctx, r.Dir, "push", "-u", "origin", r.WorkBranch); err != nil {
