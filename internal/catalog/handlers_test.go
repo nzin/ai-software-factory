@@ -69,13 +69,13 @@ func TestHTTPFlow(t *testing.T) {
 	if len(exts) != 1 || !strings.Contains(exts[0].URI, "ext/model") {
 		t.Fatalf("model extension missing: %s", body)
 	}
-	if exts[0].Params["model"] != "claude-opus-5" {
+	if exts[0].Params["model"] != "claude-sonnet-5" { // modelext.Defaults fallback
 		t.Fatalf("model = %v", exts[0].Params["model"])
 	}
 
 	// override the model
-	do(t, http.MethodPatch, srv.URL+"/v1/agents/planner/model", `{"model":"claude-sonnet-5"}`)
-	if m := get(t, srv.URL+"/v1/agents/planner/model"); !strings.Contains(m, "claude-sonnet-5") {
+	do(t, http.MethodPatch, srv.URL+"/v1/agents/planner/model", `{"model":"claude-opus-5"}`)
+	if m := get(t, srv.URL+"/v1/agents/planner/model"); !strings.Contains(m, "claude-opus-5") {
 		t.Fatalf("override not applied: %s", m)
 	}
 

@@ -392,7 +392,7 @@ func init() {
         },
         "model": {
           "type": "string",
-          "example": "claude-opus-5"
+          "example": "claude-sonnet-5"
         },
         "params": {
           "type": "object",
@@ -874,7 +874,7 @@ func init() {
         },
         "model": {
           "type": "string",
-          "example": "claude-opus-5"
+          "example": "claude-sonnet-5"
         },
         "params": {
           "type": "object",

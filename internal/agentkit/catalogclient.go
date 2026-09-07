@@ -45,6 +45,9 @@ type Registration struct {
 	Skills       []string
 	Concurrency  int
 	DefaultModel modelext.Config
+	// ForceModel overwrites the catalog's stored model config with DefaultModel
+	// even when the agent already exists (the prompt file is authoritative).
+	ForceModel bool
 }
 
 // Register performs an idempotent upsert of the agent in the catalog.
@@ -64,6 +67,9 @@ func (c *CatalogClient) Register(ctx context.Context, r Registration) error {
 		ModelConfig: modelConfigToAPI(r.DefaultModel),
 	}
 	params := agents.NewPutAgentParams().WithContext(ctx).WithRole(r.Role).WithBody(body)
+	if r.ForceModel {
+		params = params.WithForceModel(swag.Bool(true))
+	}
 	_, err := c.api.Agents.PutAgent(params)
 	if err != nil {
 		return fmt.Errorf("agentkit: register %q: %w", r.Role, err)

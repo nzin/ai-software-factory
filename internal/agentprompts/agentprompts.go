@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	yaml "go.yaml.in/yaml/v3"
+
+	"github.com/nzin/ai-software-factory/internal/modelext"
 )
 
 // Prompt is a loaded agent prompt file.
@@ -22,14 +24,19 @@ type Prompt struct {
 	Description string
 	Skills      []string
 
+	// Model is the front-matter `model:` block, or nil when the file does not
+	// declare one (the caller then falls back to modelext.Defaults).
+	Model *modelext.Config
+
 	// System is the prompt body (everything after the front-matter). Required.
 	System string
 }
 
 type frontMatter struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Skills      []string `yaml:"skills"`
+	Name        string           `yaml:"name"`
+	Description string           `yaml:"description"`
+	Skills      []string         `yaml:"skills"`
+	Model       *modelext.Config `yaml:"model"`
 }
 
 // Load reads dir/<role>.md and parses it.
@@ -76,6 +83,7 @@ func parse(role string, data []byte) (*Prompt, error) {
 		p.Name = strings.TrimSpace(fm.Name)
 		p.Description = strings.TrimSpace(fm.Description)
 		p.Skills = trimAll(fm.Skills)
+		p.Model = fm.Model
 
 		body = rest[end:]
 		body = bytes.TrimPrefix(body, []byte("\n---\n"))

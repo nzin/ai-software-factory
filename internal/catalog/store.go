@@ -22,17 +22,40 @@ type Store struct {
 // Open opens (and migrates) a SQLite database at dsn. Use
 // "file::memory:?cache=shared" for tests.
 func Open(dsn string) (*Store, error) {
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(withPragmas(dsn)), &gorm.Config{
 		Logger:  logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{LogLevel: logger.Warn, IgnoreRecordNotFoundError: true}),
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	})
 	if err != nil {
 		return nil, err
 	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	// SQLite serializes writers; agents register concurrently at startup, so
+	// keep a single connection and let busy_timeout (in the DSN) absorb waits.
+	sqlDB.SetMaxOpenConns(1)
+
 	if err := db.AutoMigrate(&agentRow{}, &modelConfigRow{}); err != nil {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// withPragmas appends busy_timeout + WAL to a file DSN so concurrent writers
+// wait rather than failing with SQLITE_BUSY. In-memory / already-parameterised
+// DSNs are left alone.
+func withPragmas(dsn string) string {
+	if strings.Contains(dsn, ":memory:") || strings.Contains(dsn, "mode=memory") || strings.Contains(dsn, "_pragma=") {
+		return dsn
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 }
 
 // Close releases the underlying database handle.

@@ -14,6 +14,9 @@ import (
 // swagger:model Task
 type Task struct {
 
+	// commit sha
+	CommitSha string `json:"commitSha,omitempty"`
+
 	// output
 	Output string `json:"output,omitempty"`
 
@@ -22,6 +25,9 @@ type Task struct {
 
 	// state
 	State string `json:"state,omitempty"`
+
+	// summary
+	Summary string `json:"summary,omitempty"`
 
 	// task ID
 	TaskID string `json:"taskID,omitempty"`

@@ -1,62 +1,74 @@
 // Package coordinator accepts a PRD, discovers specialized agents via the
-// catalog, and drives a Run through the factory. Each Run carries a TTL/budget
-// so it can never loop forever; when the budget is spent the Run stops in
-// needs_human_review.
+// catalog, and drives a Run through the factory: planner → (human approval gate)
+// → developers → reviewers, looping back to a developer on request_changes until
+// the reviewers approve or a per-stage attempt cap is hit. Each Run carries a
+// TTL/budget and works inside a per-run git workspace.
 package coordinator
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aclient"
-	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"github.com/google/uuid"
 
 	"github.com/nzin/ai-software-factory/internal/agentkit"
 	"github.com/nzin/ai-software-factory/internal/agents/planner"
+	"github.com/nzin/ai-software-factory/internal/factory"
+	"github.com/nzin/ai-software-factory/internal/forge"
 	"github.com/nzin/ai-software-factory/internal/prd"
+	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
-// Defaults for a run's budget.
+// Defaults for a run.
 const (
-	DefaultIterationBudget = 30
-	DefaultDeadline        = 2 * time.Hour
+	DefaultIterationBudget    = 40
+	DefaultDeadline           = 3 * time.Hour
+	DefaultMaxStageIterations = 3
+	DefaultBaseBranch         = "main"
 )
 
 // StageResult is what an Engine returns for one dispatched stage.
 type StageResult struct {
-	Task     Task
-	Findings []Finding
+	Task       Task
+	Findings   []Finding
+	Verdict    string // reviewers: factory.VerdictApprove | VerdictRequestChanges
+	TargetRole string // reviewers: preferred fix-pass role
+	Plan       *factory.PlanDoc
 }
 
-// Engine executes stages and decides what runs next. The default engine talks
-// to real agents over A2A; tests can substitute a fake.
+// Engine dispatches one stage to a real agent (or a fake, in tests).
 type Engine interface {
-	// Run executes run.Stage and returns its result.
 	Run(ctx context.Context, run *Run) (StageResult, error)
-	// Next returns the stage to move to, or "" when the run is complete.
-	Next(run *Run) string
 }
 
-// Orchestrator owns the in-memory set of runs and drives them.
+// Orchestrator drives runs and owns their persistence.
 type Orchestrator struct {
-	engine Engine
+	engine    Engine
+	workspace *workspace.Manager
+	store     Store
 
 	iterationBudget int
 	deadline        time.Duration
+	maxStageIter    int
+	baseBranch      string
+	pruneKeep       int
 
-	mu   sync.RWMutex
-	runs map[string]*Run
+	mu      sync.Mutex
+	driving map[string]bool // runs with a live drive goroutine
 }
 
 // Option configures an Orchestrator.
 type Option func(*Orchestrator)
 
-// WithEngine overrides the stage engine (used in tests).
-func WithEngine(e Engine) Option { return func(o *Orchestrator) { o.engine = e } }
+func WithEngine(e Engine) Option                { return func(o *Orchestrator) { o.engine = e } }
+func WithWorkspace(m *workspace.Manager) Option { return func(o *Orchestrator) { o.workspace = m } }
+func WithStore(s Store) Option                  { return func(o *Orchestrator) { o.store = s } }
+func WithMaxStageIterations(n int) Option       { return func(o *Orchestrator) { o.maxStageIter = n } }
+func WithBaseBranch(b string) Option            { return func(o *Orchestrator) { o.baseBranch = b } }
 
 // WithDefaults overrides the default per-run budget.
 func WithDefaults(iterationBudget int, deadline time.Duration) Option {
@@ -69,10 +81,15 @@ func WithDefaults(iterationBudget int, deadline time.Duration) Option {
 // New builds an Orchestrator. catalog may be nil if a custom engine is supplied.
 func New(catalog *agentkit.CatalogClient, opts ...Option) *Orchestrator {
 	o := &Orchestrator{
-		engine:          &a2aEngine{catalog: catalog},
+		engine:          &pipelineEngine{catalog: catalog},
+		workspace:       workspace.NewManager("workspace"),
+		store:           NewMemStore(),
 		iterationBudget: DefaultIterationBudget,
 		deadline:        DefaultDeadline,
-		runs:            make(map[string]*Run),
+		maxStageIter:    DefaultMaxStageIterations,
+		baseBranch:      DefaultBaseBranch,
+		pruneKeep:       50,
+		driving:         make(map[string]bool),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -80,14 +97,35 @@ func New(catalog *agentkit.CatalogClient, opts ...Option) *Orchestrator {
 	return o
 }
 
+// Recover reconciles persisted runs on startup: a run left mid-flight (running)
+// is parked for a human; awaiting_approval runs stay resumable.
+func (o *Orchestrator) Recover() error {
+	runs, err := o.store.All()
+	if err != nil {
+		return err
+	}
+	for _, r := range runs {
+		if r.Status == StatusRunning {
+			r.Status = StatusNeedsHumanReview
+			r.Reason = "coordinator restarted mid-run"
+			r.UpdatedAt = time.Now().UTC()
+			_ = o.store.Put(r)
+			log.Printf("run %s: parked (coordinator restarted mid-%s)", r.ID, r.Stage)
+		}
+	}
+	return nil
+}
+
 // SubmitOptions overrides per-run defaults.
 type SubmitOptions struct {
+	RepoURL         string
+	BaseBranch      string
 	IterationBudget int
 	Deadline        time.Duration
 }
 
-// Submit creates a run for p and drives it to completion (Phase 1 is
-// synchronous). The returned Run reflects the final state.
+// Submit creates a run, kicks off the pipeline in the background, and returns
+// immediately with the run in its initial state.
 func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions) (*Run, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
@@ -106,173 +144,280 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 	if dl > 0 {
 		deadline = now.Add(dl)
 	}
+	base := opts.BaseBranch
+	if base == "" {
+		base = o.baseBranch
+	}
 
 	run := &Run{
-		ID:        uuid.NewString(),
-		ContextID: a2a.NewContextID(),
-		PRD:       p,
-		Status:    StatusRunning,
-		Stage:     planner.Role,
-		Budget:    Budget{IterationsRemaining: iters, Deadline: deadline},
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         uuid.NewString(),
+		ContextID:  a2a.NewContextID(),
+		PRD:        p,
+		Status:     StatusRunning,
+		Stage:      planner.Role,
+		Budget:     Budget{IterationsRemaining: iters, Deadline: deadline},
+		RepoURL:    opts.RepoURL,
+		BaseBranch: base,
+		Attempts:   map[string]int{},
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
-	o.mu.Lock()
-	o.runs[run.ID] = run
-	o.mu.Unlock()
 
-	o.drive(ctx, run)
+	if o.workspace != nil {
+		ref := workspace.ParseRepoURL(opts.RepoURL, base)
+		repo, err := o.workspace.Prepare(context.Background(), run.ID, ref)
+		if err != nil {
+			return nil, fmt.Errorf("coordinator: prepare workspace: %w", err)
+		}
+		run.WorkspaceDir = repo.Dir
+		run.WorkBranch = repo.WorkBranch
+		run.RepoKind = string(repo.Kind)
+	}
+
+	if err := o.store.Put(run); err != nil {
+		return nil, err
+	}
+	o.start(run)
+	if r, ok, _ := o.store.Get(run.ID); ok {
+		return r, nil
+	}
 	return run, nil
 }
 
 // Get returns a run by id.
 func (o *Orchestrator) Get(id string) (*Run, bool) {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	r, ok := o.runs[id]
+	r, ok, _ := o.store.Get(id)
 	return r, ok
 }
 
 // List returns all runs.
 func (o *Orchestrator) List() []*Run {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	out := make([]*Run, 0, len(o.runs))
-	for _, r := range o.runs {
-		out = append(out, r)
-	}
-	return out
+	runs, _ := o.store.All()
+	return runs
 }
 
-// drive runs the state machine until the run reaches a terminal (or
-// needs-human) state or the budget is spent.
+// Approve resumes a run waiting at the human-approval gate.
+func (o *Orchestrator) Approve(id string) (*Run, error) {
+	run, ok, _ := o.store.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("coordinator: no run %s", id)
+	}
+	if run.Status != StatusAwaitingApproval {
+		return run, fmt.Errorf("coordinator: run %s is %s, not awaiting_approval", id, run.Status)
+	}
+	o.unfreeze(run)
+	run.Status = StatusRunning
+	run.Stage = firstDevelopmentStage(run)
+	run.UpdatedAt = time.Now().UTC()
+	_ = o.store.Put(run)
+	o.start(run)
+	if r, ok, _ := o.store.Get(run.ID); ok {
+		return r, nil
+	}
+	return run, nil
+}
+
+// Reject sends a run at the gate back to the planner with feedback, or abandons it.
+func (o *Orchestrator) Reject(id, feedback string, abandon bool) (*Run, error) {
+	run, ok, _ := o.store.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("coordinator: no run %s", id)
+	}
+	if run.Status != StatusAwaitingApproval {
+		return run, fmt.Errorf("coordinator: run %s is %s, not awaiting_approval", id, run.Status)
+	}
+	if abandon {
+		o.stop(run, StatusFailed, "abandoned by human at the approval gate")
+		if r, ok, _ := o.store.Get(run.ID); ok {
+			return r, nil
+		}
+		return run, nil
+	}
+	o.unfreeze(run)
+	if feedback != "" {
+		run.PRD.Description += "\n\n## Reviewer feedback on the previous plan\n" + feedback
+	}
+	run.Status = StatusRunning
+	run.Stage = planner.Role
+	run.Plan, run.PlanTasks, run.Approval = "", nil, nil
+	run.UpdatedAt = time.Now().UTC()
+	_ = o.store.Put(run)
+	o.start(run)
+	if r, ok, _ := o.store.Get(run.ID); ok {
+		return r, nil
+	}
+	return run, nil
+}
+
+// unfreeze extends the deadline by the time the run spent paused.
+func (o *Orchestrator) unfreeze(run *Run) {
+	if !run.PausedAt.IsZero() && !run.Budget.Deadline.IsZero() {
+		run.Budget.Deadline = run.Budget.Deadline.Add(time.Since(run.PausedAt))
+	}
+	run.PausedAt = time.Time{}
+}
+
+// start launches drive() in the background unless one is already running.
+func (o *Orchestrator) start(run *Run) {
+	o.mu.Lock()
+	if o.driving[run.ID] {
+		o.mu.Unlock()
+		return
+	}
+	o.driving[run.ID] = true
+	o.mu.Unlock()
+
+	go func() {
+		defer func() {
+			o.mu.Lock()
+			delete(o.driving, run.ID)
+			o.mu.Unlock()
+		}()
+		o.drive(context.Background(), run)
+	}()
+}
+
+// drive is the run state machine. It returns when the run pauses (awaiting
+// approval) or reaches a terminal state.
 func (o *Orchestrator) drive(ctx context.Context, run *Run) {
+	if run.Attempts == nil {
+		run.Attempts = map[string]int{}
+	}
 	for {
+		if run.Status == StatusAwaitingApproval || run.Status.Terminal() {
+			return
+		}
 		if spent, reason := run.Budget.Exhausted(); spent {
 			o.stop(run, StatusNeedsHumanReview, reason)
 			return
 		}
 		run.Budget.IterationsRemaining--
 
+		log.Printf("run %s: stage %s (budget %d left, attempt %d)",
+			run.ID, run.Stage, run.Budget.IterationsRemaining, run.Attempts[run.Stage])
+		started := time.Now()
 		res, err := o.engine.Run(ctx, run)
 		if err != nil {
+			log.Printf("run %s: stage %s FAILED after %s: %v",
+				run.ID, run.Stage, time.Since(started).Round(time.Second), err)
 			o.stop(run, StatusFailed, err.Error())
 			return
 		}
-		o.mu.Lock()
-		run.Tasks = append(run.Tasks, res.Task)
-		run.Findings = append(run.Findings, res.Findings...)
-		if res.Task.Role == planner.Role && res.Task.Output != "" {
-			run.Plan = res.Task.Output
-		}
-		run.UpdatedAt = time.Now().UTC()
-		o.mu.Unlock()
+		log.Printf("run %s: stage %s done in %s — %s (verdict=%q, %d findings)",
+			run.ID, run.Stage, time.Since(started).Round(time.Second), res.Task.Summary, res.Verdict, len(res.Findings))
 
-		next := o.engine.Next(run)
-		if next == "" {
-			o.stop(run, StatusDone, "")
+		run.Tasks = append(run.Tasks, res.Task)
+		run.Findings = mergeFindings(run.Findings, res.Findings)
+		run.UpdatedAt = time.Now().UTC()
+
+		switch {
+		case run.Stage == planner.Role:
+			o.applyPlan(run, res)
+			if run.Approval != nil && run.Approval.Required {
+				run.PausedAt = time.Now().UTC()
+				run.Status = StatusAwaitingApproval
+				run.Stage = ""
+				_ = o.store.Put(run)
+				log.Printf("run %s: awaiting human approval — %s", run.ID, run.Approval.Reason)
+				return
+			}
+			run.Stage = firstDevelopmentStage(run)
+
+		case isReviewer(run.Stage) && res.Verdict == factory.VerdictRequestChanges:
+			target := res.TargetRole
+			if !factory.IsDeveloperRole(target) {
+				target = factory.RouteRole(res.Findings, run.lastDeveloper())
+			}
+			run.Attempts[target]++
+			if run.Attempts[target] > o.maxStageIter {
+				o.stop(run, StatusNeedsHumanReview,
+					fmt.Sprintf("%s still failing review after %d fix attempts", target, o.maxStageIter))
+				return
+			}
+			log.Printf("run %s: %s requested changes → back to %s (attempt %d)",
+				run.ID, run.Stage, target, run.Attempts[target])
+			run.Stage = target
+
+		default:
+			run.Stage = nextStage(run)
+		}
+
+		_ = o.store.Put(run)
+
+		if run.Stage == "" {
+			o.finish(ctx, run)
+			log.Printf("run %s: complete — status=%s", run.ID, run.Status)
 			return
 		}
-		run.Stage = next
+	}
+}
+
+func (o *Orchestrator) applyPlan(run *Run, res StageResult) {
+	if res.Plan != nil {
+		run.Plan = res.Plan.Prose
+		run.PlanTasks = res.Plan.Tasks
+		run.Approval = &res.Plan.Approval
+	} else if res.Task.Output != "" {
+		run.Plan = res.Task.Output
+	}
+}
+
+func (o *Orchestrator) finish(ctx context.Context, run *Run) {
+	if run.WorkspaceDir == "" {
+		o.stop(run, StatusDone, "")
+		return
+	}
+	repo, err := workspace.Open(ctx, run.WorkspaceDir)
+	if err != nil {
+		o.stop(run, StatusDone, "workspace unavailable")
+		return
+	}
+	repo.BaseBranch = run.BaseBranch
+	if !repo.HasCommits(ctx) {
+		o.stop(run, StatusDone, "no changes were made")
+		return
+	}
+
+	switch run.RepoKind {
+	case string(workspace.KindRemote):
+		if err := repo.Push(ctx); err != nil {
+			// The clone-fallback for a local repo has no reachable origin; treat
+			// a push failure there as "branch ready locally".
+			o.stop(run, StatusPRReady, "commits ready on "+run.WorkBranch+" (push failed: "+err.Error()+")")
+			return
+		}
+		if url, _ := forge.OpenPR(ctx, run.RepoURL, run.BaseBranch, run.WorkBranch, run.PRD.Title, run.Plan); url != "" {
+			run.PRURL = url
+			o.stop(run, StatusPROpen, "PR opened: "+url)
+			return
+		}
+		o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" pushed to origin")
+
+	case string(workspace.KindLocal):
+		src := run.RepoURL
+		o.stop(run, StatusPRReady,
+			fmt.Sprintf("branch %s ready in %s — `git merge %s`", run.WorkBranch, src, run.WorkBranch))
+
+	default: // new
+		o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" in "+run.WorkspaceDir)
+	}
+
+	if o.workspace != nil {
+		_ = o.workspace.Prune(o.pruneKeep)
 	}
 }
 
 func (o *Orchestrator) stop(run *Run, status Status, reason string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
 	run.Status = status
 	run.Reason = reason
+	run.Stage = ""
 	run.UpdatedAt = time.Now().UTC()
+	_ = o.store.Put(run)
 }
 
-// --- default engine: talk to real agents over A2A ---
-
-type a2aEngine struct {
-	catalog *agentkit.CatalogClient
-}
-
-func (e *a2aEngine) Run(ctx context.Context, run *Run) (StageResult, error) {
-	switch run.Stage {
-	case planner.Role:
-		out, err := e.dispatch(ctx, planner.Role, run.ContextID, run.PRD.Text())
-		if err != nil {
-			return StageResult{}, err
-		}
-		return StageResult{Task: Task{Role: planner.Role, State: "completed", Output: out}}, nil
-	default:
-		return StageResult{}, fmt.Errorf("coordinator: no engine for stage %q", run.Stage)
+func mergeFindings(existing, incoming []Finding) []Finding {
+	if len(incoming) == 0 {
+		return existing
 	}
-}
-
-// Next: Phase 1 stops after the planner.
-func (e *a2aEngine) Next(run *Run) string {
-	if run.Stage == planner.Role {
-		return ""
-	}
-	return ""
-}
-
-// dispatch discovers the agent for role via the catalog and sends it one message.
-func (e *a2aEngine) dispatch(ctx context.Context, role, contextID, text string) (string, error) {
-	if e.catalog == nil {
-		return "", fmt.Errorf("coordinator: no catalog configured")
-	}
-	baseURL, err := e.catalog.GetAgentBaseURL(ctx, role)
-	if err != nil {
-		return "", err
-	}
-	card, err := agentcard.DefaultResolver.Resolve(ctx, baseURL)
-	if err != nil {
-		return "", fmt.Errorf("coordinator: resolve %s card: %w", role, err)
-	}
-	client, err := a2aclient.NewFromCard(ctx, card)
-	if err != nil {
-		return "", fmt.Errorf("coordinator: a2a client for %s: %w", role, err)
-	}
-
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
-	msg.ContextID = contextID
-
-	res, err := client.SendMessage(ctx, &a2a.SendMessageRequest{Message: msg})
-	if err != nil {
-		return "", fmt.Errorf("coordinator: send to %s: %w", role, err)
-	}
-	return resultText(res), nil
-}
-
-func resultText(res a2a.SendMessageResult) string {
-	switch v := res.(type) {
-	case *a2a.Message:
-		return partsText(v.Parts)
-	case *a2a.Task:
-		if v.Status.Message != nil {
-			if t := partsText(v.Status.Message.Parts); t != "" {
-				return t
-			}
-		}
-		for i := len(v.History) - 1; i >= 0; i-- {
-			if v.History[i].Role == a2a.MessageRoleAgent {
-				if t := partsText(v.History[i].Parts); t != "" {
-					return t
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func partsText(parts a2a.ContentParts) string {
-	var out string
-	for _, p := range parts {
-		if p == nil {
-			continue
-		}
-		if t := p.Text(); t != "" {
-			if out != "" {
-				out += "\n"
-			}
-			out += t
-		}
-	}
-	return out
+	return append(existing, incoming...)
 }

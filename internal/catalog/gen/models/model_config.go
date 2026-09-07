@@ -27,7 +27,7 @@ type ModelConfig struct {
 	MaxTokens int64 `json:"maxTokens,omitempty"`
 
 	// model
-	// Example: claude-opus-5
+	// Example: claude-sonnet-5
 	// Required: true
 	Model *string `json:"model"`
 

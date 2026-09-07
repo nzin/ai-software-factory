@@ -1,0 +1,11 @@
+# security-reviewer agent: base image + Go SAST tools + Node (for `npm audit`).
+FROM golang:1.26 AS tools
+RUN GOBIN=/gobin go install github.com/securego/gosec/v2/cmd/gosec@latest \
+ && GOBIN=/gobin go install golang.org/x/vuln/cmd/govulncheck@latest
+
+FROM ai-software-factory-base:latest
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nodejs npm golang-go \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=tools /gobin/gosec /gobin/govulncheck /usr/local/bin/
+CMD ["/app/bin/agent-security-reviewer"]

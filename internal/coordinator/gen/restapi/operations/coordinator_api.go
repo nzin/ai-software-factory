@@ -41,10 +41,34 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 
 		JSONProducer: runtime.JSONProducer(),
 
+		RunsApproveRunHandler: runs.ApproveRunHandlerFunc(func(params runs.ApproveRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.ApproveRun has not yet been implemented")
+		}),
+
+		RunsGetRunHandler: runs.GetRunHandlerFunc(func(params runs.GetRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.GetRun has not yet been implemented")
+		}),
+
 		HealthHealthHandler: health.HealthHandlerFunc(func(params health.HealthParams) middleware.Responder {
 			_ = params
 
 			return middleware.NotImplemented("operation health.Health has not yet been implemented")
+		}),
+
+		RunsListRunsHandler: runs.ListRunsHandlerFunc(func(params runs.ListRunsParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.ListRuns has not yet been implemented")
+		}),
+
+		RunsRejectRunHandler: runs.RejectRunHandlerFunc(func(params runs.RejectRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.RejectRun has not yet been implemented")
 		}),
 
 		RunsSubmitPRDHandler: runs.SubmitPRDHandlerFunc(func(params runs.SubmitPRDParams) middleware.Responder {
@@ -88,8 +112,16 @@ type CoordinatorAPI struct {
 	//   - application/json
 	JSONProducer runtime.Producer
 
+	// RunsApproveRunHandler sets the operation handler for the approve run operation
+	RunsApproveRunHandler runs.ApproveRunHandler
+	// RunsGetRunHandler sets the operation handler for the get run operation
+	RunsGetRunHandler runs.GetRunHandler
 	// HealthHealthHandler sets the operation handler for the health operation
 	HealthHealthHandler health.HealthHandler
+	// RunsListRunsHandler sets the operation handler for the list runs operation
+	RunsListRunsHandler runs.ListRunsHandler
+	// RunsRejectRunHandler sets the operation handler for the reject run operation
+	RunsRejectRunHandler runs.RejectRunHandler
 	// RunsSubmitPRDHandler sets the operation handler for the submit p r d operation
 	RunsSubmitPRDHandler runs.SubmitPRDHandler
 
@@ -169,8 +201,20 @@ func (o *CoordinatorAPI) Validate() error {
 		unregistered = append(unregistered, "JSONProducer")
 	}
 
+	if o.RunsApproveRunHandler == nil {
+		unregistered = append(unregistered, "runs.ApproveRunHandler")
+	}
+	if o.RunsGetRunHandler == nil {
+		unregistered = append(unregistered, "runs.GetRunHandler")
+	}
 	if o.HealthHealthHandler == nil {
 		unregistered = append(unregistered, "health.HealthHandler")
+	}
+	if o.RunsListRunsHandler == nil {
+		unregistered = append(unregistered, "runs.ListRunsHandler")
+	}
+	if o.RunsRejectRunHandler == nil {
+		unregistered = append(unregistered, "runs.RejectRunHandler")
 	}
 	if o.RunsSubmitPRDHandler == nil {
 		unregistered = append(unregistered, "runs.SubmitPRDHandler")
@@ -265,10 +309,26 @@ func (o *CoordinatorAPI) initHandlerCache() {
 		o.handlers = make(map[string]map[string]http.Handler)
 	}
 
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/v1/runs/{id}/approve"] = runs.NewApproveRun(o.context, o.RunsApproveRunHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/v1/runs/{id}"] = runs.NewGetRun(o.context, o.RunsGetRunHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/healthz"] = health.NewHealth(o.context, o.HealthHealthHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/v1/runs"] = runs.NewListRuns(o.context, o.RunsListRunsHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/v1/runs/{id}/reject"] = runs.NewRejectRun(o.context, o.RunsRejectRunHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

@@ -41,7 +41,8 @@ type Options struct {
 	// PromptsDir holds <role>.md prompt files (default "agent_prompts").
 	PromptsDir string
 
-	// DefaultModel is sent to the catalog on first registration only.
+	// DefaultModel, when its Model field is set, overrides the prompt file's
+	// `model:` block (a code escape hatch; normally left zero).
 	DefaultModel modelext.Config
 }
 
@@ -61,12 +62,10 @@ func (b *Bootstrapped) LLMExecutor() a2asrv.AgentExecutor {
 }
 
 // Bootstrap loads the agent's prompt file, registers the agent with the catalog
-// (using prompt front-matter to override the code defaults), fetches the
-// effective model configuration, and returns everything needed to serve it.
+// (the prompt file's front-matter is authoritative — name / skills / model are
+// re-asserted on every start), fetches the effective model configuration, and
+// returns everything needed to serve it.
 func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
-	if opts.DefaultModel.Model == "" {
-		opts.DefaultModel = modelext.Defaults(opts.Role)
-	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
@@ -79,8 +78,10 @@ func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 		return nil, err
 	}
 	meta := mergeMeta(opts, prompt)
-	log.Printf("agentkit: %q prompt loaded from %s (%d bytes)",
-		meta.Name, opts.PromptsDir+"/"+opts.Role+".md", len(prompt.System))
+	model := resolveModel(opts, prompt)
+	log.Printf("agentkit: %q prompt from %s (%d bytes), model=%s maxTokens=%d effort=%q",
+		meta.Name, opts.PromptsDir+"/"+opts.Role+".md", len(prompt.System),
+		model.Model, model.MaxTokens, model.Effort)
 
 	cc, err := NewCatalogClient(opts.CatalogURL)
 	if err != nil {
@@ -95,15 +96,19 @@ func Bootstrap(ctx context.Context, opts Options) (*Bootstrapped, error) {
 		Transport:    "JSONRPC",
 		Skills:       meta.Skills,
 		Concurrency:  opts.Concurrency,
-		DefaultModel: opts.DefaultModel,
+		DefaultModel: model,
+		ForceModel:   true, // the prompt file is the source of truth
 	}); err != nil {
 		return nil, err
 	}
 
-	model, err := cc.GetModel(ctx, opts.Role)
+	// Read back the effective config (identical to `model` after ForceModel,
+	// unless a race with an operator PATCH).
+	effective, err := cc.GetModel(ctx, opts.Role)
 	if err != nil {
 		return nil, err
 	}
+	model = effective
 
 	card := buildCard(meta, opts.PublicURL, model)
 	return &Bootstrapped{
@@ -122,6 +127,22 @@ type meta struct {
 	Name        string
 	Description string
 	Skills      []string
+}
+
+// resolveModel picks the agent's model configuration, most-authoritative first:
+// an explicit Options.DefaultModel (code escape hatch) → the prompt file's
+// `model:` block → modelext.Defaults. Blank fields are then filled by WithDefaults.
+func resolveModel(opts Options, p *agentprompts.Prompt) modelext.Config {
+	var m modelext.Config
+	switch {
+	case opts.DefaultModel.Model != "":
+		m = opts.DefaultModel
+	case p != nil && p.Model != nil:
+		m = *p.Model
+	default:
+		m = modelext.Defaults(opts.Role)
+	}
+	return m.WithDefaults()
 }
 
 // mergeMeta layers prompt front-matter over the Options code defaults

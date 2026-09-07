@@ -27,13 +27,16 @@ const Description = "Claude model and parameters this agent runs on"
 // There is deliberately no temperature / top_p: current Claude models reject
 // sampling parameters. Extra forward-compatible knobs go in Params.
 type Config struct {
-	Provider  string         `json:"provider"`
-	Model     string         `json:"model"`
-	MaxTokens int64          `json:"maxTokens,omitempty"`
-	Effort    string         `json:"effort,omitempty"`   // "" | low | medium | high | xhigh | max
-	Thinking  string         `json:"thinking,omitempty"` // "" (=adaptive) | adaptive | off
-	Params    map[string]any `json:"params,omitempty"`
+	Provider  string         `json:"provider" yaml:"provider"`
+	Model     string         `json:"model" yaml:"model"`
+	MaxTokens int64          `json:"maxTokens,omitempty" yaml:"maxTokens,omitempty"`
+	Effort    string         `json:"effort,omitempty" yaml:"effort,omitempty"`     // "" | low | medium | high | xhigh | max
+	Thinking  string         `json:"thinking,omitempty" yaml:"thinking,omitempty"` // "" (=adaptive) | adaptive | off
+	Params    map[string]any `json:"params,omitempty" yaml:"params,omitempty"`
 }
+
+// DefaultModel is used when nothing declares a model.
+const DefaultModel = "claude-sonnet-5"
 
 // WithDefaults returns a copy of c with empty fields filled in.
 func (c Config) WithDefaults() Config {
@@ -42,7 +45,7 @@ func (c Config) WithDefaults() Config {
 		out.Provider = "anthropic"
 	}
 	if out.Model == "" {
-		out.Model = "claude-opus-5"
+		out.Model = DefaultModel
 	}
 	if out.MaxTokens == 0 {
 		out.MaxTokens = 16000
@@ -106,13 +109,10 @@ func FromCard(card *a2a.AgentCard) (Config, bool) {
 	return Config{}, false
 }
 
-// Defaults returns a sensible default configuration for a given agent role.
-// Used only the first time an agent registers with the catalog.
+// Defaults is the fallback configuration for an agent whose prompt file
+// (agent_prompts/<role>.md) does not declare a `model:` block. Per-role tuning
+// — model, token budget, effort — lives in those files, not here.
 func Defaults(role string) Config {
-	switch role {
-	case "planner", "security-reviewer", "code-reviewer", "ui-ux-designer":
-		return Config{Provider: "anthropic", Model: "claude-opus-5", MaxTokens: 16000, Effort: "high", Thinking: "adaptive"}
-	default:
-		return Config{Provider: "anthropic", Model: "claude-opus-5", MaxTokens: 16000, Thinking: "adaptive"}
-	}
+	_ = role
+	return Config{Provider: "anthropic", Model: DefaultModel, MaxTokens: 16000, Thinking: "adaptive"}
 }

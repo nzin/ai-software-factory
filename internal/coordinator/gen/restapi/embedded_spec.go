@@ -51,11 +51,11 @@ func init() {
     },
     "/v1/prd": {
       "post": {
-        "description": "Phase 1 responds when the run has completed (or stopped in needs_human_review). Later phases make this asynchronous.\n",
+        "description": "Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.\n",
         "tags": [
           "runs"
         ],
-        "summary": "Submit a PRD and run it through the factory",
+        "summary": "Submit a PRD; the factory runs it in the background",
         "operationId": "submitPRD",
         "parameters": [
           {
@@ -68,8 +68,140 @@ func init() {
           }
         ],
         "responses": {
+          "202": {
+            "description": "the run was accepted and started",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List all runs",
+        "operationId": "listRuns",
+        "responses": {
           "200": {
-            "description": "the run result",
+            "description": "the runs",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/RunSummary"
+              }
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get one run",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "404": {
+            "description": "no such run",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/approve": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Approve the plan and resume a run paused at the approval gate",
+        "operationId": "approveRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the resumed run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/reject": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Reject the plan; replan with feedback, or abandon the run",
+        "operationId": "rejectRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/RejectRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
             "schema": {
               "$ref": "#/definitions/Run"
             }
@@ -85,6 +217,17 @@ func init() {
     }
   },
   "definitions": {
+    "ApprovalDecision": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
     "Error": {
       "type": "object",
       "required": [
@@ -99,18 +242,37 @@ func init() {
     "Finding": {
       "type": "object",
       "properties": {
-        "note": {
+        "category": {
           "type": "string"
         },
-        "source": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "severity": {
           "type": "string",
           "enum": [
-            "human",
-            "security-reviewer",
-            "code-reviewer"
+            "",
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "info"
           ]
         },
+        "source": {
+          "description": "kodus | gosec | govulncheck | npm-audit | security-reviewer | human",
+          "type": "string"
+        },
+        "suggestion": {
+          "type": "string"
+        },
         "targetRole": {
+          "type": "string"
+        },
+        "title": {
           "type": "string"
         }
       }
@@ -147,14 +309,55 @@ func init() {
         }
       }
     },
+    "PlanTask": {
+      "type": "object",
+      "properties": {
+        "details": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "RejectRequest": {
+      "type": "object",
+      "properties": {
+        "abandon": {
+          "description": "if true, abandon the run instead of replanning",
+          "type": "boolean"
+        },
+        "feedback": {
+          "description": "notes for the planner's next attempt",
+          "type": "string"
+        }
+      }
+    },
     "Run": {
       "type": "object",
       "required": [
         "id",
-        "status",
-        "stage"
+        "status"
       ],
       "properties": {
+        "approval": {
+          "$ref": "#/definitions/ApprovalDecision"
+        },
+        "attempts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "baseBranch": {
+          "type": "string"
+        },
         "contextID": {
           "type": "string"
         },
@@ -181,8 +384,29 @@ func init() {
         "plan": {
           "type": "string"
         },
+        "planTasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanTask"
+          }
+        },
+        "prURL": {
+          "type": "string"
+        },
         "reason": {
-          "description": "why the run stopped, when status is needs_human_review or failed",
+          "description": "why the run stopped / is paused",
+          "type": "string"
+        },
+        "repoKind": {
+          "type": "string",
+          "enum": [
+            "",
+            "new",
+            "local",
+            "remote"
+          ]
+        },
+        "repoURL": {
           "type": "string"
         },
         "stage": {
@@ -193,7 +417,9 @@ func init() {
           "enum": [
             "queued",
             "running",
+            "awaiting_approval",
             "pr_ready",
+            "pr_open",
             "accepted",
             "changes_requested",
             "needs_human_review",
@@ -207,6 +433,49 @@ func init() {
             "$ref": "#/definitions/Task"
           }
         },
+        "uiSpec": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workBranch": {
+          "type": "string"
+        },
+        "workspaceDir": {
+          "type": "string"
+        }
+      }
+    },
+    "RunSummary": {
+      "type": "object",
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "iterationsRemaining": {
+          "type": "integer"
+        },
+        "prURL": {
+          "type": "string"
+        },
+        "repoURL": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -216,6 +485,10 @@ func init() {
     "SubmitPRDRequest": {
       "type": "object",
       "properties": {
+        "baseBranch": {
+          "description": "branch to base the work on (default main)",
+          "type": "string"
+        },
         "deadlineSeconds": {
           "description": "override the default per-run wall-clock budget, in seconds",
           "type": "integer"
@@ -230,12 +503,19 @@ func init() {
         },
         "prd": {
           "$ref": "#/definitions/PRD"
+        },
+        "repoURL": {
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (worked on via git worktree). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "type": "string"
         }
       }
     },
     "Task": {
       "type": "object",
       "properties": {
+        "commitSha": {
+          "type": "string"
+        },
         "output": {
           "type": "string"
         },
@@ -243,6 +523,9 @@ func init() {
           "type": "string"
         },
         "state": {
+          "type": "string"
+        },
+        "summary": {
           "type": "string"
         },
         "taskID": {
@@ -289,11 +572,11 @@ func init() {
     },
     "/v1/prd": {
       "post": {
-        "description": "Phase 1 responds when the run has completed (or stopped in needs_human_review). Later phases make this asynchronous.\n",
+        "description": "Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.\n",
         "tags": [
           "runs"
         ],
-        "summary": "Submit a PRD and run it through the factory",
+        "summary": "Submit a PRD; the factory runs it in the background",
         "operationId": "submitPRD",
         "parameters": [
           {
@@ -306,8 +589,140 @@ func init() {
           }
         ],
         "responses": {
+          "202": {
+            "description": "the run was accepted and started",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List all runs",
+        "operationId": "listRuns",
+        "responses": {
           "200": {
-            "description": "the run result",
+            "description": "the runs",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/RunSummary"
+              }
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get one run",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "404": {
+            "description": "no such run",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/approve": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Approve the plan and resume a run paused at the approval gate",
+        "operationId": "approveRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the resumed run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/reject": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Reject the plan; replan with feedback, or abandon the run",
+        "operationId": "rejectRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/RejectRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
             "schema": {
               "$ref": "#/definitions/Run"
             }
@@ -323,6 +738,17 @@ func init() {
     }
   },
   "definitions": {
+    "ApprovalDecision": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
     "Error": {
       "type": "object",
       "required": [
@@ -337,18 +763,37 @@ func init() {
     "Finding": {
       "type": "object",
       "properties": {
-        "note": {
+        "category": {
           "type": "string"
         },
-        "source": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "severity": {
           "type": "string",
           "enum": [
-            "human",
-            "security-reviewer",
-            "code-reviewer"
+            "",
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "info"
           ]
         },
+        "source": {
+          "description": "kodus | gosec | govulncheck | npm-audit | security-reviewer | human",
+          "type": "string"
+        },
+        "suggestion": {
+          "type": "string"
+        },
         "targetRole": {
+          "type": "string"
+        },
+        "title": {
           "type": "string"
         }
       }
@@ -385,14 +830,55 @@ func init() {
         }
       }
     },
+    "PlanTask": {
+      "type": "object",
+      "properties": {
+        "details": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "RejectRequest": {
+      "type": "object",
+      "properties": {
+        "abandon": {
+          "description": "if true, abandon the run instead of replanning",
+          "type": "boolean"
+        },
+        "feedback": {
+          "description": "notes for the planner's next attempt",
+          "type": "string"
+        }
+      }
+    },
     "Run": {
       "type": "object",
       "required": [
         "id",
-        "status",
-        "stage"
+        "status"
       ],
       "properties": {
+        "approval": {
+          "$ref": "#/definitions/ApprovalDecision"
+        },
+        "attempts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "baseBranch": {
+          "type": "string"
+        },
         "contextID": {
           "type": "string"
         },
@@ -419,8 +905,29 @@ func init() {
         "plan": {
           "type": "string"
         },
+        "planTasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PlanTask"
+          }
+        },
+        "prURL": {
+          "type": "string"
+        },
         "reason": {
-          "description": "why the run stopped, when status is needs_human_review or failed",
+          "description": "why the run stopped / is paused",
+          "type": "string"
+        },
+        "repoKind": {
+          "type": "string",
+          "enum": [
+            "",
+            "new",
+            "local",
+            "remote"
+          ]
+        },
+        "repoURL": {
           "type": "string"
         },
         "stage": {
@@ -431,7 +938,9 @@ func init() {
           "enum": [
             "queued",
             "running",
+            "awaiting_approval",
             "pr_ready",
+            "pr_open",
             "accepted",
             "changes_requested",
             "needs_human_review",
@@ -445,6 +954,49 @@ func init() {
             "$ref": "#/definitions/Task"
           }
         },
+        "uiSpec": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workBranch": {
+          "type": "string"
+        },
+        "workspaceDir": {
+          "type": "string"
+        }
+      }
+    },
+    "RunSummary": {
+      "type": "object",
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        },
+        "iterationsRemaining": {
+          "type": "integer"
+        },
+        "prURL": {
+          "type": "string"
+        },
+        "repoURL": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -454,6 +1006,10 @@ func init() {
     "SubmitPRDRequest": {
       "type": "object",
       "properties": {
+        "baseBranch": {
+          "description": "branch to base the work on (default main)",
+          "type": "string"
+        },
         "deadlineSeconds": {
           "description": "override the default per-run wall-clock budget, in seconds",
           "type": "integer"
@@ -468,12 +1024,19 @@ func init() {
         },
         "prd": {
           "$ref": "#/definitions/PRD"
+        },
+        "repoURL": {
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (worked on via git worktree). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "type": "string"
         }
       }
     },
     "Task": {
       "type": "object",
       "properties": {
+        "commitSha": {
+          "type": "string"
+        },
         "output": {
           "type": "string"
         },
@@ -481,6 +1044,9 @@ func init() {
           "type": "string"
         },
         "state": {
+          "type": "string"
+        },
+        "summary": {
           "type": "string"
         },
         "taskID": {

@@ -21,8 +21,8 @@ type SubmitPRDReader struct {
 // ReadResponse reads a server response into the received o.
 func (o *SubmitPRDReader) ReadResponse(response runtime.ClientResponse, consumer runtime.Consumer) (any, error) {
 	switch response.Code() {
-	case 200:
-		result := NewSubmitPRDOK()
+	case 202:
+		result := NewSubmitPRDAccepted()
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
 			return nil, err
 		}
@@ -39,63 +39,63 @@ func (o *SubmitPRDReader) ReadResponse(response runtime.ClientResponse, consumer
 	}
 }
 
-// NewSubmitPRDOK creates a SubmitPRDOK with default headers values
-func NewSubmitPRDOK() *SubmitPRDOK {
-	return &SubmitPRDOK{}
+// NewSubmitPRDAccepted creates a SubmitPRDAccepted with default headers values
+func NewSubmitPRDAccepted() *SubmitPRDAccepted {
+	return &SubmitPRDAccepted{}
 }
 
-// SubmitPRDOK describes a response with status code 200, with default header values.
+// SubmitPRDAccepted describes a response with status code 202, with default header values.
 //
-// the run result
-type SubmitPRDOK struct {
+// the run was accepted and started
+type SubmitPRDAccepted struct {
 	Payload *models.Run
 }
 
-// IsSuccess returns true when this submit p r d o k response has a 2xx status code
-func (o *SubmitPRDOK) IsSuccess() bool {
+// IsSuccess returns true when this submit p r d accepted response has a 2xx status code
+func (o *SubmitPRDAccepted) IsSuccess() bool {
 	return true
 }
 
-// IsRedirect returns true when this submit p r d o k response has a 3xx status code
-func (o *SubmitPRDOK) IsRedirect() bool {
+// IsRedirect returns true when this submit p r d accepted response has a 3xx status code
+func (o *SubmitPRDAccepted) IsRedirect() bool {
 	return false
 }
 
-// IsClientError returns true when this submit p r d o k response has a 4xx status code
-func (o *SubmitPRDOK) IsClientError() bool {
+// IsClientError returns true when this submit p r d accepted response has a 4xx status code
+func (o *SubmitPRDAccepted) IsClientError() bool {
 	return false
 }
 
-// IsServerError returns true when this submit p r d o k response has a 5xx status code
-func (o *SubmitPRDOK) IsServerError() bool {
+// IsServerError returns true when this submit p r d accepted response has a 5xx status code
+func (o *SubmitPRDAccepted) IsServerError() bool {
 	return false
 }
 
-// IsCode returns true when this submit p r d o k response a status code equal to that given
-func (o *SubmitPRDOK) IsCode(code int) bool {
-	return code == 200
+// IsCode returns true when this submit p r d accepted response a status code equal to that given
+func (o *SubmitPRDAccepted) IsCode(code int) bool {
+	return code == 202
 }
 
-// Code gets the status code for the submit p r d o k response
-func (o *SubmitPRDOK) Code() int {
-	return 200
+// Code gets the status code for the submit p r d accepted response
+func (o *SubmitPRDAccepted) Code() int {
+	return 202
 }
 
-func (o *SubmitPRDOK) Error() string {
+func (o *SubmitPRDAccepted) Error() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /v1/prd][%d] submitPRDOK %s", 200, payload)
+	return fmt.Sprintf("[POST /v1/prd][%d] submitPRDAccepted %s", 202, payload)
 }
 
-func (o *SubmitPRDOK) String() string {
+func (o *SubmitPRDAccepted) String() string {
 	payload, _ := json.Marshal(o.Payload)
-	return fmt.Sprintf("[POST /v1/prd][%d] submitPRDOK %s", 200, payload)
+	return fmt.Sprintf("[POST /v1/prd][%d] submitPRDAccepted %s", 202, payload)
 }
 
-func (o *SubmitPRDOK) GetPayload() *models.Run {
+func (o *SubmitPRDAccepted) GetPayload() *models.Run {
 	return o.Payload
 }
 
-func (o *SubmitPRDOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+func (o *SubmitPRDAccepted) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	o.Payload = new(models.Run)
 

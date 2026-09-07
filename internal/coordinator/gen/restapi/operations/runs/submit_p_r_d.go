@@ -28,9 +28,9 @@ func NewSubmitPRD(ctx *middleware.Context, handler SubmitPRDHandler) *SubmitPRD 
 
 // SubmitPRD swagger:route POST /v1/prd runs submitPRD
 //
-// # Submit a PRD and run it through the factory
+// Submit a PRD; the factory runs it in the background
 //
-// Phase 1 responds when the run has completed (or stopped in needs_human_review). Later phases make this asynchronous.
+// Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.
 type SubmitPRD struct {
 	Context *middleware.Context
 	Handler SubmitPRDHandler

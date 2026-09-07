@@ -4,12 +4,13 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	yaml "go.yaml.in/yaml/v3"
 )
 
 func TestExtensionRoundTrip(t *testing.T) {
 	in := Config{
 		Provider:  "anthropic",
-		Model:     "claude-opus-5",
+		Model:     "claude-sonnet-5",
 		MaxTokens: 20000,
 		Effort:    "high",
 		Thinking:  "adaptive",
@@ -58,7 +59,29 @@ func TestFromCard(t *testing.T) {
 
 func TestWithDefaults(t *testing.T) {
 	got := Config{}.WithDefaults()
-	if got.Provider != "anthropic" || got.Model != "claude-opus-5" || got.MaxTokens != 16000 || got.Thinking != "adaptive" {
+	if got.Provider != "anthropic" || got.Model != DefaultModel || got.MaxTokens != 16000 || got.Thinking != "adaptive" {
 		t.Fatalf("defaults not applied: %+v", got)
+	}
+	if DefaultModel != "claude-sonnet-5" {
+		t.Fatalf("DefaultModel = %q, want claude-sonnet-5", DefaultModel)
+	}
+}
+
+func TestYAMLTags(t *testing.T) {
+	// Prompt-file front-matter uses these exact keys; yaml.v3 lowercases field
+	// names by default, so the tags must carry the camelCase names.
+	const block = `
+provider: anthropic
+model: claude-sonnet-5
+maxTokens: 64000
+effort: low
+thinking: adaptive
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(block), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Model != "claude-sonnet-5" || c.MaxTokens != 64000 || c.Effort != "low" || c.Thinking != "adaptive" {
+		t.Fatalf("yaml parse: %+v", c)
 	}
 }

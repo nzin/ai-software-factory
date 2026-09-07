@@ -11,7 +11,9 @@ include .env
 export
 endif
 
-.PHONY: all gen build test vet demo tools clean
+KODUS_DIR := .kodus
+
+.PHONY: all gen build test vet demo tools clean up down logs compose-build kodus-up kodus-down
 
 all: gen build test
 
@@ -57,5 +59,43 @@ demo: build
 	fi
 	@./scripts/demo.sh
 
+## compose-build: build the base image, then every service image
+compose-build:
+	@docker build -t ai-software-factory-base:latest -f Dockerfile .
+	@docker compose build
+
+## up: build + start the factory (catalog, coordinator, all agents)
+up: compose-build
+	@docker compose up -d
+	@echo "coordinator: http://localhost:8090   catalog: http://localhost:8080"
+
+## down: stop the factory
+down:
+	@docker compose down
+
+logs:
+	@docker compose logs -f --tail=100
+
+## kodus-up: clone kodus-installer and start the self-hosted Kodus stack.
+## Then follow scripts/kodus-setup.md to get KODUS_TEAM_KEY into .env.
+kodus-up:
+	@test -d $(KODUS_DIR) || git clone --depth 1 https://github.com/kodustech/kodus-installer $(KODUS_DIR)
+	@if [ ! -f $(KODUS_DIR)/.env ]; then \
+		cp $(KODUS_DIR)/.env.example $(KODUS_DIR)/.env; \
+		bash $(KODUS_DIR)/scripts/generate-secrets.sh; \
+		key=$$(grep '^ANTHROPIC_API_KEY=' .env | cut -d= -f2-); \
+		sed -i.bak "s|^API_OPEN_AI_API_KEY=.*|API_OPEN_AI_API_KEY=$$key|; \
+			s|^API_OPENAI_FORCE_BASE_URL=.*|API_OPENAI_FORCE_BASE_URL=https://api.anthropic.com/v1/|; \
+			s|^API_LLM_PROVIDER_MODEL=.*|API_LLM_PROVIDER_MODEL=claude-sonnet-5|" $(KODUS_DIR)/.env; \
+		rm -f $(KODUS_DIR)/.env.bak; \
+	fi
+	@for n in shared-network monitoring-network kodus-backend-services; do docker network create $$n 2>/dev/null || true; done
+	@cd $(KODUS_DIR) && docker compose up -d
+	@echo "Kodus API: http://localhost:3001   web: http://localhost:3000"
+	@echo "Next: scripts/kodus-setup.md (create an org, set the LLM key, mint KODUS_TEAM_KEY)"
+
+kodus-down:
+	@cd $(KODUS_DIR) && docker compose down
+
 clean:
-	@rm -rf bin *.db /tmp/asf-demo*
+	@rm -rf bin *.db /tmp/asf-demo* workspace

@@ -31,10 +31,11 @@ paths:
     post:
       tags: [runs]
       operationId: submitPRD
-      summary: Submit a PRD and run it through the factory
+      summary: Submit a PRD; the factory runs it in the background
       description: >
-        Phase 1 responds when the run has completed (or stopped in
-        needs_human_review). Later phases make this asynchronous.
+        Returns immediately with the run in its initial state. Poll
+        GET /v1/runs/{id} for progress. A run may pause at
+        status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.
       parameters:
         - name: body
           in: body
@@ -42,8 +43,94 @@ paths:
           schema:
             $ref: "#/definitions/SubmitPRDRequest"
       responses:
+        202:
+          description: the run was accepted and started
+          schema:
+            $ref: "#/definitions/Run"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/runs:
+    get:
+      tags: [runs]
+      operationId: listRuns
+      summary: List all runs
+      responses:
         200:
-          description: the run result
+          description: the runs
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/RunSummary"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/runs/{id}:
+    get:
+      tags: [runs]
+      operationId: getRun
+      summary: Get one run
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+      responses:
+        200:
+          description: the run
+          schema:
+            $ref: "#/definitions/Run"
+        404:
+          description: no such run
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/runs/{id}/approve:
+    post:
+      tags: [runs]
+      operationId: approveRun
+      summary: Approve the plan and resume a run paused at the approval gate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+      responses:
+        200:
+          description: the resumed run
+          schema:
+            $ref: "#/definitions/Run"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/runs/{id}/reject:
+    post:
+      tags: [runs]
+      operationId: rejectRun
+      summary: Reject the plan; replan with feedback, or abandon the run
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+        - name: body
+          in: body
+          required: false
+          schema:
+            $ref: "#/definitions/RejectRequest"
+      responses:
+        200:
+          description: the run
           schema:
             $ref: "#/definitions/Run"
         default:
@@ -67,6 +154,18 @@ definitions:
       message:
         type: string
 
+  PlanTask:
+    type: object
+    properties:
+      id:
+        type: string
+      role:
+        type: string
+      title:
+        type: string
+      details:
+        type: string
+
   PRD:
     type: object
     required: [title]
@@ -88,6 +187,16 @@ definitions:
       markdown:
         type: string
         description: raw markdown PRD; used when prd is not provided
+      repoURL:
+        type: string
+        description: >
+          target repository. Empty = a new local repo. file:///abs/path or a
+          bare path = an existing local repo (worked on via git worktree).
+          https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened
+          if GITHUB_TOKEN is set).
+      baseBranch:
+        type: string
+        description: branch to base the work on (default main)
       iterationBudget:
         type: integer
         description: override the default per-run iteration budget
@@ -95,15 +204,68 @@ definitions:
         type: integer
         description: override the default per-run wall-clock budget, in seconds
 
+  RejectRequest:
+    type: object
+    properties:
+      feedback:
+        type: string
+        description: notes for the planner's next attempt
+      abandon:
+        type: boolean
+        description: if true, abandon the run instead of replanning
+
+  ApprovalDecision:
+    type: object
+    properties:
+      required:
+        type: boolean
+      reason:
+        type: string
+
+  RunSummary:
+    type: object
+    properties:
+      id:
+        type: string
+      status:
+        type: string
+      stage:
+        type: string
+      title:
+        type: string
+      repoURL:
+        type: string
+      prURL:
+        type: string
+      iterationsRemaining:
+        type: integer
+      createdAt:
+        type: string
+        format: date-time
+      updatedAt:
+        type: string
+        format: date-time
+
   Finding:
     type: object
     properties:
       source:
         type: string
-        enum: [human, security-reviewer, code-reviewer]
-      targetRole:
+        description: kodus | gosec | govulncheck | npm-audit | security-reviewer | human
+      severity:
         type: string
-      note:
+        enum: ["", critical, high, medium, low, info]
+      category:
+        type: string
+      file:
+        type: string
+      line:
+        type: integer
+      title:
+        type: string
+      suggestion:
+        type: string
+      targetRole:
         type: string
 
   Task:
@@ -115,12 +277,16 @@ definitions:
         type: string
       state:
         type: string
+      summary:
+        type: string
+      commitSha:
+        type: string
       output:
         type: string
 
   Run:
     type: object
-    required: [id, status, stage]
+    required: [id, status]
     properties:
       id:
         type: string
@@ -128,12 +294,31 @@ definitions:
         type: string
       status:
         type: string
-        enum: [queued, running, pr_ready, accepted, changes_requested, needs_human_review, failed, done]
+        enum: [queued, running, awaiting_approval, pr_ready, pr_open, accepted, changes_requested, needs_human_review, failed, done]
       stage:
         type: string
       reason:
         type: string
-        description: why the run stopped, when status is needs_human_review or failed
+        description: why the run stopped / is paused
+      repoURL:
+        type: string
+      repoKind:
+        type: string
+        enum: ["", new, local, remote]
+      baseBranch:
+        type: string
+      workBranch:
+        type: string
+      workspaceDir:
+        type: string
+      prURL:
+        type: string
+      approval:
+        $ref: "#/definitions/ApprovalDecision"
+      attempts:
+        type: object
+        additionalProperties:
+          type: integer
       iterationsRemaining:
         type: integer
       deadline:
@@ -141,6 +326,12 @@ definitions:
         format: date-time
       plan:
         type: string
+      uiSpec:
+        type: string
+      planTasks:
+        type: array
+        items:
+          $ref: "#/definitions/PlanTask"
       findings:
         type: array
         items:

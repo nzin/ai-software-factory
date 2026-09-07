@@ -18,22 +18,37 @@ import (
 // swagger:model Finding
 type Finding struct {
 
-	// note
-	Note string `json:"note,omitempty"`
+	// category
+	Category string `json:"category,omitempty"`
 
-	// source
-	// Enum: ["human","security-reviewer","code-reviewer"]
+	// file
+	File string `json:"file,omitempty"`
+
+	// line
+	Line int64 `json:"line,omitempty"`
+
+	// severity
+	// Enum: ["","critical","high","medium","low","info"]
+	Severity string `json:"severity,omitempty"`
+
+	// kodus | gosec | govulncheck | npm-audit | security-reviewer | human
 	Source string `json:"source,omitempty"`
+
+	// suggestion
+	Suggestion string `json:"suggestion,omitempty"`
 
 	// target role
 	TargetRole string `json:"targetRole,omitempty"`
+
+	// title
+	Title string `json:"title,omitempty"`
 }
 
 // Validate validates this finding
 func (m *Finding) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := m.validateSource(formats); err != nil {
+	if err := m.validateSeverity(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -43,45 +58,54 @@ func (m *Finding) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
-var findingTypeSourcePropEnum []any
+var findingTypeSeverityPropEnum []any
 
 func init() {
 	var res []string
-	if err := json.Unmarshal([]byte(`["human","security-reviewer","code-reviewer"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["","critical","high","medium","low","info"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {
-		findingTypeSourcePropEnum = append(findingTypeSourcePropEnum, v)
+		findingTypeSeverityPropEnum = append(findingTypeSeverityPropEnum, v)
 	}
 }
 
 const (
 
-	// FindingSourceHuman captures enum value "human"
-	FindingSourceHuman string = "human"
+	// FindingSeverityEmpty captures enum value ""
+	FindingSeverityEmpty string = ""
 
-	// FindingSourceSecurityDashReviewer captures enum value "security-reviewer"
-	FindingSourceSecurityDashReviewer string = "security-reviewer"
+	// FindingSeverityCritical captures enum value "critical"
+	FindingSeverityCritical string = "critical"
 
-	// FindingSourceCodeDashReviewer captures enum value "code-reviewer"
-	FindingSourceCodeDashReviewer string = "code-reviewer"
+	// FindingSeverityHigh captures enum value "high"
+	FindingSeverityHigh string = "high"
+
+	// FindingSeverityMedium captures enum value "medium"
+	FindingSeverityMedium string = "medium"
+
+	// FindingSeverityLow captures enum value "low"
+	FindingSeverityLow string = "low"
+
+	// FindingSeverityInfo captures enum value "info"
+	FindingSeverityInfo string = "info"
 )
 
 // prop value enum
-func (m *Finding) validateSourceEnum(path, location string, value string) error {
-	if err := validate.EnumCase(path, location, value, findingTypeSourcePropEnum, true); err != nil {
+func (m *Finding) validateSeverityEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, findingTypeSeverityPropEnum, true); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *Finding) validateSource(formats strfmt.Registry) error {
-	if typeutils.IsZero(m.Source) { // not required
+func (m *Finding) validateSeverity(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Severity) { // not required
 		return nil
 	}
 
 	// value enum
-	if err := m.validateSourceEnum("source", "body", m.Source); err != nil {
+	if err := m.validateSeverityEnum("severity", "body", m.Severity); err != nil {
 		return err
 	}
 

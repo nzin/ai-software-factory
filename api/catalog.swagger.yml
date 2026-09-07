@@ -193,7 +193,7 @@ definitions:
         example: anthropic
       model:
         type: string
-        example: claude-opus-5
+        example: claude-sonnet-5
       maxTokens:
         type: integer
         format: int64

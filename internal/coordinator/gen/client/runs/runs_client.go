@@ -55,25 +55,293 @@ type ClientOption func(*runtime.ClientOperation)
 // ClientService is the interface for Client methods.
 type ClientService interface {
 
-	// SubmitPRD submit a p r d and run it through the factory.
-	SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDOK, error)
+	// ApproveRun approve the plan and resume a run paused at the approval gate.
+	ApproveRun(params *ApproveRunParams, opts ...ClientOption) (*ApproveRunOK, error)
 
-	// SubmitPRDContext submit a p r d and run it through the factory.
-	SubmitPRDContext(ctx context.Context, params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDOK, error)
+	// ApproveRunContext approve the plan and resume a run paused at the approval gate.
+	ApproveRunContext(ctx context.Context, params *ApproveRunParams, opts ...ClientOption) (*ApproveRunOK, error)
+
+	// GetRun get one run.
+	GetRun(params *GetRunParams, opts ...ClientOption) (*GetRunOK, error)
+
+	// GetRunContext get one run.
+	GetRunContext(ctx context.Context, params *GetRunParams, opts ...ClientOption) (*GetRunOK, error)
+
+	// ListRuns list all runs.
+	ListRuns(params *ListRunsParams, opts ...ClientOption) (*ListRunsOK, error)
+
+	// ListRunsContext list all runs.
+	ListRunsContext(ctx context.Context, params *ListRunsParams, opts ...ClientOption) (*ListRunsOK, error)
+
+	// RejectRun reject the plan replan with feedback or abandon the run.
+	RejectRun(params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error)
+
+	// RejectRunContext reject the plan replan with feedback or abandon the run.
+	RejectRunContext(ctx context.Context, params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error)
+
+	// SubmitPRD submit a p r d the factory runs it in the background.
+	SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDAccepted, error)
+
+	// SubmitPRDContext submit a p r d the factory runs it in the background.
+	SubmitPRDContext(ctx context.Context, params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDAccepted, error)
 
 	SetTransport(transport runtime.ContextualTransport)
 }
 
-// SubmitPRD submits a p r d and run it through the factory.
+// ApproveRun approves the plan and resume a run paused at the approval gate.
 //
-// Phase 1 responds when the run has completed (or stopped in needs_human_review). Later phases make this asynchronous.
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.ApproveRunContext] instead.
+func (a *Client) ApproveRun(params *ApproveRunParams, opts ...ClientOption) (*ApproveRunOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.ApproveRunContext(ctx, params, opts...)
+}
+
+// ApproveRunContext approves the plan and resume a run paused at the approval gate.
+//
+// Do not use the deprecated [ApproveRunParams.Context] with this method: it would be ignored.
+func (a *Client) ApproveRunContext(ctx context.Context, params *ApproveRunParams, opts ...ClientOption) (*ApproveRunOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewApproveRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "approveRun",
+		Method:             "POST",
+		PathPattern:        "/v1/runs/{id}/approve",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ApproveRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*ApproveRunOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*ApproveRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// GetRun gets one run.
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.GetRunContext] instead.
+func (a *Client) GetRun(params *GetRunParams, opts ...ClientOption) (*GetRunOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.GetRunContext(ctx, params, opts...)
+}
+
+// GetRunContext gets one run.
+//
+// Do not use the deprecated [GetRunParams.Context] with this method: it would be ignored.
+func (a *Client) GetRunContext(ctx context.Context, params *GetRunParams, opts ...ClientOption) (*GetRunOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "getRun",
+		Method:             "GET",
+		PathPattern:        "/v1/runs/{id}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetRunOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*GetRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// ListRuns lists all runs.
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.ListRunsContext] instead.
+func (a *Client) ListRuns(params *ListRunsParams, opts ...ClientOption) (*ListRunsOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.ListRunsContext(ctx, params, opts...)
+}
+
+// ListRunsContext lists all runs.
+//
+// Do not use the deprecated [ListRunsParams.Context] with this method: it would be ignored.
+func (a *Client) ListRunsContext(ctx context.Context, params *ListRunsParams, opts ...ClientOption) (*ListRunsOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewListRunsParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "listRuns",
+		Method:             "GET",
+		PathPattern:        "/v1/runs",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ListRunsReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*ListRunsOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*ListRunsDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// RejectRun rejects the plan replan with feedback or abandon the run.
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.RejectRunContext] instead.
+func (a *Client) RejectRun(params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.RejectRunContext(ctx, params, opts...)
+}
+
+// RejectRunContext rejects the plan replan with feedback or abandon the run.
+//
+// Do not use the deprecated [RejectRunParams.Context] with this method: it would be ignored.
+func (a *Client) RejectRunContext(ctx context.Context, params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewRejectRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "rejectRun",
+		Method:             "POST",
+		PathPattern:        "/v1/runs/{id}/reject",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &RejectRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*RejectRunOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*RejectRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// SubmitPRD submits a p r d the factory runs it in the background.
+//
+// Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.
 // .
 //
 // This method does not support injected context.
 // However, timeout and opentracing contexts are honored whenever enabled.
 //
 // If you need to pass a specific context, use [Client.SubmitPRDContext] instead.
-func (a *Client) SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDOK, error) {
+func (a *Client) SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDAccepted, error) {
 	var ctx context.Context
 	if params != nil && params.inner.ctx != nil {
 		ctx = params.inner.ctx
@@ -84,13 +352,13 @@ func (a *Client) SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*Subm
 	return a.SubmitPRDContext(ctx, params, opts...)
 }
 
-// SubmitPRDContext submits a p r d and run it through the factory.
+// SubmitPRDContext submits a p r d the factory runs it in the background.
 //
-// Phase 1 responds when the run has completed (or stopped in needs_human_review). Later phases make this asynchronous.
+// Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.
 // .
 //
 // Do not use the deprecated [SubmitPRDParams.Context] with this method: it would be ignored.
-func (a *Client) SubmitPRDContext(ctx context.Context, params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDOK, error) {
+func (a *Client) SubmitPRDContext(ctx context.Context, params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDAccepted, error) {
 	// NOTE: parameters are not validated before sending
 	if params == nil {
 		params = NewSubmitPRDParams()
@@ -118,7 +386,7 @@ func (a *Client) SubmitPRDContext(ctx context.Context, params *SubmitPRDParams, 
 	}
 
 	// only one success response has to be checked
-	success, ok := result.(*SubmitPRDOK)
+	success, ok := result.(*SubmitPRDAccepted)
 	if ok {
 		return success, nil
 	}

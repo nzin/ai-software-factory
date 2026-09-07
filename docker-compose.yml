@@ -1,0 +1,113 @@
+# The AI Software Factory itself: catalog + coordinator + the agent roster.
+#
+#   make up          # build + start the factory
+#   make kodus-up    # start the self-hosted Kodus stack (separate compose, see
+#                    # scripts/kodus-setup.md); the code-reviewer reaches its API
+#                    # via KODUS_API_URL (default http://host.docker.internal:3001)
+#
+# Requires ANTHROPIC_API_KEY in .env (see .env.example).
+
+name: ai-software-factory
+
+x-agent: &agent
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ai-software-factory-base:latest
+  restart: unless-stopped
+  environment:
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+    ASF_CATALOG_URL: http://catalog:8080
+    ASF_WORKSPACE_ROOT: /workspace
+  volumes:
+    - factory-workspace:/workspace
+  networks: [factory-net]
+  depends_on:
+    catalog:
+      condition: service_healthy
+
+services:
+  catalog:
+    build: { context: ., dockerfile: Dockerfile }
+    image: ai-software-factory-base:latest
+    command: ["/app/bin/catalog", "--addr", ":8080", "--db", "/data/catalog.db"]
+    restart: unless-stopped
+    volumes:
+      - catalog-data:/data
+    networks: [factory-net]
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  coordinator:
+    <<: *agent
+    command: ["/app/bin/coordinator", "serve", "--addr", ":8090", "--runstore", "/data/runs.db"]
+    ports: ["8090:8090"]
+    volumes:
+      - factory-workspace:/workspace
+      - coordinator-data:/data
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      ASF_CATALOG_URL: http://catalog:8080
+      ASF_WORKSPACE_ROOT: /workspace
+      ASF_RUNSTORE: /data/runs.db
+      ASF_BASE_BRANCH: ${ASF_BASE_BRANCH:-main}
+      # Optional: open a GitHub PR when a run targets a github.com remote.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+
+  agent-planner:
+    <<: *agent
+    command: ["/app/bin/agent-planner", "--addr", ":9101", "--public-url", "http://agent-planner:9101"]
+
+  agent-ui-ux-designer:
+    <<: *agent
+    command: ["/app/bin/agent-ui-ux-designer", "--addr", ":9102", "--public-url", "http://agent-ui-ux-designer:9102"]
+
+  agent-backend-developer:
+    <<: *agent
+    command: ["/app/bin/agent-backend-developer", "--addr", ":9103", "--public-url", "http://agent-backend-developer:9103"]
+
+  agent-frontend-developer:
+    <<: *agent
+    command: ["/app/bin/agent-frontend-developer", "--addr", ":9104", "--public-url", "http://agent-frontend-developer:9104"]
+
+  agent-mobile-developer:
+    <<: *agent
+    command: ["/app/bin/agent-mobile-developer", "--addr", ":9105", "--public-url", "http://agent-mobile-developer:9105"]
+
+  agent-security-reviewer:
+    <<: *agent
+    build:
+      context: .
+      dockerfile: Dockerfile.secreview
+    image: ai-software-factory-secreview:latest
+    command: ["/app/bin/agent-security-reviewer", "--addr", ":9106", "--public-url", "http://agent-security-reviewer:9106"]
+
+  agent-code-reviewer:
+    <<: *agent
+    build:
+      context: .
+      dockerfile: Dockerfile.codereview
+    image: ai-software-factory-codereview:latest
+    command: ["/app/bin/agent-code-reviewer", "--addr", ":9107", "--public-url", "http://agent-code-reviewer:9107"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?}
+      ASF_CATALOG_URL: http://catalog:8080
+      ASF_WORKSPACE_ROOT: /workspace
+      # Self-hosted Kodus API (started separately via `make kodus-up`).
+      KODUS_API_URL: ${KODUS_API_URL:-http://host.docker.internal:3001}
+      KODUS_TEAM_KEY: ${KODUS_TEAM_KEY:-}
+
+networks:
+  factory-net:
+    name: factory-net
+
+volumes:
+  factory-workspace:
+  catalog-data:
+  coordinator-data:

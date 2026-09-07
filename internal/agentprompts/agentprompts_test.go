@@ -40,11 +40,35 @@ func TestNoFrontMatter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Name != "" || p.Description != "" || len(p.Skills) != 0 {
+	if p.Name != "" || p.Description != "" || len(p.Skills) != 0 || p.Model != nil {
 		t.Fatalf("expected no meta: %+v", p)
 	}
 	if p.System != "You are a backend developer." {
 		t.Fatalf("system = %q", p.System)
+	}
+}
+
+func TestModelBlock(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "backend-developer",
+		"---\nname: Backend\nmodel:\n  provider: anthropic\n  model: claude-sonnet-5\n  maxTokens: 64000\n  effort: low\n  thinking: adaptive\n---\nbody\n")
+
+	p, err := Load(dir, "backend-developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Model == nil {
+		t.Fatal("model block not parsed")
+	}
+	if p.Model.Model != "claude-sonnet-5" || p.Model.MaxTokens != 64000 || p.Model.Effort != "low" {
+		t.Fatalf("model = %+v", *p.Model)
+	}
+
+	// front-matter without a model block -> nil
+	write(t, dir, "planner", "---\nname: Planner\n---\nbody\n")
+	p2, _ := Load(dir, "planner")
+	if p2.Model != nil {
+		t.Fatalf("expected nil model, got %+v", *p2.Model)
 	}
 }
 

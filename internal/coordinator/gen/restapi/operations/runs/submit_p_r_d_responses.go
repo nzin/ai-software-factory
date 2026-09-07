@@ -9,39 +9,39 @@ import (
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/models"
 )
 
-// SubmitPRDOKCode is the HTTP code returned for type SubmitPRDOK
-const SubmitPRDOKCode int = 200
+// SubmitPRDAcceptedCode is the HTTP code returned for type SubmitPRDAccepted
+const SubmitPRDAcceptedCode int = 202
 
-// SubmitPRDOK the run result
+// SubmitPRDAccepted the run was accepted and started
 //
-// swagger:response submitPRDOK
-type SubmitPRDOK struct {
+// swagger:response submitPRDAccepted
+type SubmitPRDAccepted struct {
 
 	// In: Body
 	Payload *models.Run `json:"body,omitempty"`
 }
 
-// NewSubmitPRDOK creates SubmitPRDOK with default headers values
-func NewSubmitPRDOK() *SubmitPRDOK {
+// NewSubmitPRDAccepted creates SubmitPRDAccepted with default headers values
+func NewSubmitPRDAccepted() *SubmitPRDAccepted {
 
-	return &SubmitPRDOK{}
+	return &SubmitPRDAccepted{}
 }
 
-// WithPayload adds the payload to the submit p r d o k response
-func (o *SubmitPRDOK) WithPayload(payload *models.Run) *SubmitPRDOK {
+// WithPayload adds the payload to the submit p r d accepted response
+func (o *SubmitPRDAccepted) WithPayload(payload *models.Run) *SubmitPRDAccepted {
 	o.Payload = payload
 	return o
 }
 
-// SetPayload sets the payload to the submit p r d o k response
-func (o *SubmitPRDOK) SetPayload(payload *models.Run) {
+// SetPayload sets the payload to the submit p r d accepted response
+func (o *SubmitPRDAccepted) SetPayload(payload *models.Run) {
 	o.Payload = payload
 }
 
 // WriteResponse to the client
-func (o *SubmitPRDOK) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
+func (o *SubmitPRDAccepted) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
 
-	rw.WriteHeader(200)
+	rw.WriteHeader(202)
 	if o.Payload != nil {
 		payload := o.Payload
 		if err := producer.Produce(rw, payload); err != nil {

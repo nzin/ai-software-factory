@@ -17,6 +17,9 @@ import (
 // swagger:model SubmitPRDRequest
 type SubmitPRDRequest struct {
 
+	// branch to base the work on (default main)
+	BaseBranch string `json:"baseBranch,omitempty"`
+
 	// override the default per-run wall-clock budget, in seconds
 	DeadlineSeconds int64 `json:"deadlineSeconds,omitempty"`
 
@@ -28,6 +31,10 @@ type SubmitPRDRequest struct {
 
 	// prd
 	Prd *PRD `json:"prd,omitempty"`
+
+	// target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (worked on via git worktree). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).
+	//
+	RepoURL string `json:"repoURL,omitempty"`
 }
 
 // Validate validates this submit p r d request

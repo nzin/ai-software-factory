@@ -6,6 +6,10 @@
 /browser/*/node_modules/
 coverage.txt
 
+# per-run git worktrees, and the cloned Kodus installer
+/workspace/
+/.kodus/
+
 # local secrets / scratch (never commit)
 anthropic_api_key
 *_api_key

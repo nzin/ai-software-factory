@@ -20,6 +20,15 @@ import (
 // swagger:model Run
 type Run struct {
 
+	// approval
+	Approval *ApprovalDecision `json:"approval,omitempty"`
+
+	// attempts
+	Attempts map[string]int64 `json:"attempts,omitempty"`
+
+	// base branch
+	BaseBranch string `json:"baseBranch,omitempty"`
+
 	// context ID
 	ContextID string `json:"contextID,omitempty"`
 
@@ -44,29 +53,54 @@ type Run struct {
 	// plan
 	Plan string `json:"plan,omitempty"`
 
-	// why the run stopped, when status is needs_human_review or failed
+	// plan tasks
+	PlanTasks []*PlanTask `json:"planTasks"`
+
+	// pr URL
+	PrURL string `json:"prURL,omitempty"`
+
+	// why the run stopped / is paused
 	Reason string `json:"reason,omitempty"`
 
+	// repo kind
+	// Enum: ["","new","local","remote"]
+	RepoKind string `json:"repoKind,omitempty"`
+
+	// repo URL
+	RepoURL string `json:"repoURL,omitempty"`
+
 	// stage
-	// Required: true
-	Stage *string `json:"stage"`
+	Stage string `json:"stage,omitempty"`
 
 	// status
 	// Required: true
-	// Enum: ["queued","running","pr_ready","accepted","changes_requested","needs_human_review","failed","done"]
+	// Enum: ["queued","running","awaiting_approval","pr_ready","pr_open","accepted","changes_requested","needs_human_review","failed","done"]
 	Status *string `json:"status"`
 
 	// tasks
 	Tasks []*Task `json:"tasks"`
 
+	// ui spec
+	UISpec string `json:"uiSpec,omitempty"`
+
 	// updated at
 	// Format: date-time
 	UpdatedAt strfmt.DateTime `json:"updatedAt,omitempty"`
+
+	// work branch
+	WorkBranch string `json:"workBranch,omitempty"`
+
+	// workspace dir
+	WorkspaceDir string `json:"workspaceDir,omitempty"`
 }
 
 // Validate validates this run
 func (m *Run) Validate(formats strfmt.Registry) error {
 	var res []error
+
+	if err := m.validateApproval(formats); err != nil {
+		res = append(res, err)
+	}
 
 	if err := m.validateCreatedAt(formats); err != nil {
 		res = append(res, err)
@@ -84,7 +118,11 @@ func (m *Run) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
-	if err := m.validateStage(formats); err != nil {
+	if err := m.validatePlanTasks(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateRepoKind(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -103,6 +141,29 @@ func (m *Run) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *Run) validateApproval(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Approval) { // not required
+		return nil
+	}
+
+	if m.Approval != nil {
+		if err := m.Approval.Validate(formats); err != nil {
+			ve := new(errors.Validation)
+			if stderrors.As(err, &ve) {
+				return ve.ValidateName("approval")
+			}
+			ce := new(errors.CompositeError)
+			if stderrors.As(err, &ce) {
+				return ce.ValidateName("approval")
+			}
+
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -169,9 +230,78 @@ func (m *Run) validateID(formats strfmt.Registry) error {
 	return nil
 }
 
-func (m *Run) validateStage(formats strfmt.Registry) error {
+func (m *Run) validatePlanTasks(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.PlanTasks) { // not required
+		return nil
+	}
 
-	if err := validate.Required("stage", "body", m.Stage); err != nil {
+	for i := 0; i < len(m.PlanTasks); i++ {
+		if typeutils.IsZero(m.PlanTasks[i]) { // not required
+			continue
+		}
+
+		if m.PlanTasks[i] != nil {
+			if err := m.PlanTasks[i].Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("planTasks" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("planTasks" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+var runTypeRepoKindPropEnum []any
+
+func init() {
+	var res []string
+	if err := json.Unmarshal([]byte(`["","new","local","remote"]`), &res); err != nil {
+		panic(err)
+	}
+	for _, v := range res {
+		runTypeRepoKindPropEnum = append(runTypeRepoKindPropEnum, v)
+	}
+}
+
+const (
+
+	// RunRepoKindEmpty captures enum value ""
+	RunRepoKindEmpty string = ""
+
+	// RunRepoKindNew captures enum value "new"
+	RunRepoKindNew string = "new"
+
+	// RunRepoKindLocal captures enum value "local"
+	RunRepoKindLocal string = "local"
+
+	// RunRepoKindRemote captures enum value "remote"
+	RunRepoKindRemote string = "remote"
+)
+
+// prop value enum
+func (m *Run) validateRepoKindEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, runTypeRepoKindPropEnum, true); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Run) validateRepoKind(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.RepoKind) { // not required
+		return nil
+	}
+
+	// value enum
+	if err := m.validateRepoKindEnum("repoKind", "body", m.RepoKind); err != nil {
 		return err
 	}
 
@@ -182,7 +312,7 @@ var runTypeStatusPropEnum []any
 
 func init() {
 	var res []string
-	if err := json.Unmarshal([]byte(`["queued","running","pr_ready","accepted","changes_requested","needs_human_review","failed","done"]`), &res); err != nil {
+	if err := json.Unmarshal([]byte(`["queued","running","awaiting_approval","pr_ready","pr_open","accepted","changes_requested","needs_human_review","failed","done"]`), &res); err != nil {
 		panic(err)
 	}
 	for _, v := range res {
@@ -198,8 +328,14 @@ const (
 	// RunStatusRunning captures enum value "running"
 	RunStatusRunning string = "running"
 
+	// RunStatusAwaitingApproval captures enum value "awaiting_approval"
+	RunStatusAwaitingApproval string = "awaiting_approval"
+
 	// RunStatusPrReady captures enum value "pr_ready"
 	RunStatusPrReady string = "pr_ready"
+
+	// RunStatusPrOpen captures enum value "pr_open"
+	RunStatusPrOpen string = "pr_open"
 
 	// RunStatusAccepted captures enum value "accepted"
 	RunStatusAccepted string = "accepted"
@@ -285,7 +421,15 @@ func (m *Run) validateUpdatedAt(formats strfmt.Registry) error {
 func (m *Run) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.contextValidateApproval(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateFindings(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidatePlanTasks(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -296,6 +440,31 @@ func (m *Run) ContextValidate(ctx context.Context, formats strfmt.Registry) erro
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *Run) contextValidateApproval(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.Approval != nil {
+
+		if typeutils.IsZero(m.Approval) { // not required
+			return nil
+		}
+
+		if err := m.Approval.ContextValidate(ctx, formats); err != nil {
+			ve := new(errors.Validation)
+			if stderrors.As(err, &ve) {
+				return ve.ValidateName("approval")
+			}
+			ce := new(errors.CompositeError)
+			if stderrors.As(err, &ce) {
+				return ce.ValidateName("approval")
+			}
+
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -317,6 +486,35 @@ func (m *Run) contextValidateFindings(ctx context.Context, formats strfmt.Regist
 				ce := new(errors.CompositeError)
 				if stderrors.As(err, &ce) {
 					return ce.ValidateName("findings" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+func (m *Run) contextValidatePlanTasks(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.PlanTasks); i++ {
+
+		if m.PlanTasks[i] != nil {
+
+			if typeutils.IsZero(m.PlanTasks[i]) { // not required
+				return nil
+			}
+
+			if err := m.PlanTasks[i].ContextValidate(ctx, formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("planTasks" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("planTasks" + "." + strconv.Itoa(i))
 				}
 
 				return err

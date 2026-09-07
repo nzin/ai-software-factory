@@ -15,7 +15,7 @@ func TestBuildCard(t *testing.T) {
 		Transport:   "JSONRPC",
 		Skills:      []string{"planning", "architecture"},
 	}
-	card := BuildCard(a, modelext.Config{Model: "claude-opus-5"})
+	card := BuildCard(a, modelext.Config{Model: "claude-sonnet-5"})
 
 	if len(card.SupportedInterfaces) != 1 {
 		t.Fatalf("interfaces: %+v", card.SupportedInterfaces)
@@ -28,7 +28,7 @@ func TestBuildCard(t *testing.T) {
 	if !ok {
 		t.Fatal("card has no model extension")
 	}
-	if cfg.Model != "claude-opus-5" {
+	if cfg.Model != "claude-sonnet-5" {
 		t.Fatalf("model on card = %q", cfg.Model)
 	}
 	if len(card.Skills) != 1 || len(card.Skills[0].Tags) != 2 {

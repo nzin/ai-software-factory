@@ -1,0 +1,12 @@
+# code-reviewer agent: base image + Node 22 + the Kodus CLI.
+# (Kodus CLI declares node>=20 but its bundled undici needs a newer runtime;
+# Node 22 works. Debian's apt `nodejs` is 18, so pull 22 from NodeSource.)
+FROM ai-software-factory-base:latest
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @kodus/cli \
+ && npm cache clean --force \
+ && node --version \
+ && kodus --version || true
+CMD ["/app/bin/agent-code-reviewer"]
