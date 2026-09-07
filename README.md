@@ -6,16 +6,17 @@ agents collaborates to produce a feature as a **Pull Request** for human review.
 Agents talk to each other over the [A2A protocol](https://a2a-protocol.org/)
 using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
 
-> **Status: Phase 4.** The full agent roster (planner, UI/UX designer, backend /
-> frontend / mobile developers, security reviewer, code reviewer); the
-> coordinator loop with a **feedback loop** (reviewers route `request_changes`
-> back to a developer until they approve or a per-stage cap trips), a **human
-> approval gate** after planning for non-trivial code changes, **real git
-> repositories** (new / local worktree / remote clone + push + GitHub PR),
-> **durable async runs** with a full per-run event log, and a **web UI** at
-> `http://localhost:8090` — a runs kanban, a per-run timeline, the A2A catalog,
-> and accept / request-changes review controls. Next up: build+test gates and
-> GitHub PR-comment ingestion — see [`plan_next.md`](plan_next.md).
+> **Status: Phase 5.** The full agent roster (planner, UI/UX designer, backend /
+> frontend / mobile developers, **build gate**, security reviewer, code reviewer);
+> the coordinator loop with a **feedback loop** (reviewers and the build gate
+> route `request_changes` back to a developer until they pass or a per-stage cap
+> trips), a **human approval gate** after planning, **real git repositories**
+> (new / local worktree / remote clone + push + GitHub PR), a **build/test gate**
+> that compiles and tests every commit before the reviewers see it, a **GitHub
+> PR-review webhook** that re-enters the factory when someone reviews the PR,
+> **durable async runs** with a per-run event log, and a **web UI** at
+> `http://localhost:8090` — runs kanban, per-run timeline, PR revision history,
+> A2A catalog, approve / request-changes controls. See [`plan_next.md`](plan_next.md).
 
 ## Architecture
 
@@ -24,13 +25,14 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
              │                                                        │
              │   planner ─▶ [human approval gate] ─▶ ui-ux-designer   ▼
              │     ─▶ {backend, frontend, mobile} developers        Claude
-             │     ─▶ security-reviewer ─▶ code-reviewer            (per-agent
-             │            │                     │                    model, set
-             │            └──── request_changes ┘  (back to a dev,   by catalog)
-             │                 bounded by a per-stage attempt cap)
+             │     ─▶ build-gate ─▶ security-reviewer ─▶ code-reviewer (per-agent
+             │            │              │                   │         model, set
+             │            └── request_changes / build_failed ┘         by catalog)
+             │                 (back to a dev, bounded by a per-role attempt cap)
              ▼
        per-run workspace  (new repo / `git worktree` of a local repo / clone of a
-       remote) on branch asf/run-<id>; on finish: push + open a PR, or pr_ready
+       remote) on branch asf/run-<id>; on finish: push + open a PR, or pr_ready.
+       A GitHub PR review webhooks back in as another request_changes round.
 ```
 
 - **catalog** — REST service (`go-swagger`, spec-first: `api/catalog.swagger.yml`).
@@ -49,8 +51,10 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
   and survive a coordinator restart.
 - **agents** — A2A agents built on `internal/agentkit` (register with the
   catalog, fetch model config, serve `/.well-known/agent-card.json` + `/invoke`).
-  Developers write files into the worktree; `security-reviewer` runs SAST
-  (gosec / govulncheck / `npm audit`) plus an LLM pass; `code-reviewer` shells
+  Developers write files into the worktree; **`build-gate`** (`internal/buildgate`,
+  no LLM) runs `go build`/`go test` and `npm run build` and bounces a broken
+  commit back to its author; `security-reviewer` runs SAST (gosec / govulncheck /
+  `npm audit`) plus an LLM pass; `code-reviewer` shells
   out to the [Kodus](https://kodus.io/) CLI.
 - **web UI** — a Vue 3 SPA (`browser/asf-ui`) served by the coordinator at `/`,
   same-origin with its API. See [Web UI](#web-ui).
@@ -65,7 +69,7 @@ reads the catalog through for the UI (`GET /v1/agents`).
 | Route | What |
 |---|---|
 | `/` | **Runs kanban** — every run bucketed into *In progress · Awaiting approval · Needs attention · Ready for review · Closed*, polled every 4s |
-| `/runs/:id` | **Run detail** — a **Timeline** of every event, **Steps** with each agent's summary / files written / commit / verdict / findings, the **Plan**, all **Findings**, and the raw JSON. Action bar switches on status: approve/reject at the gate, resume/abandon when parked, accept/request-changes when a branch is ready |
+| `/runs/:id` | **Run detail** — a **Timeline** of every event, **Revisions** (the PR history: each branch-ready cycle and what triggered the next), **Steps** with each agent's summary / files written / commit / verdict / findings, the **Plan**, all **Findings**, and the raw JSON. Action bar switches on status: approve/reject at the gate, resume/abandon when parked, accept/request-changes when a branch is ready |
 | `/submit` | **Submit a PRD** — markdown + target repo + budget overrides |
 | `/agents` | **A2A catalog** — the roster with each agent's model, effort and skills |
 | `/agents/:role` | **Agent detail** — registration, model config, and the assembled `AgentCard` with its `modelext` extension |
@@ -95,8 +99,8 @@ name: Backend Developer
 skills: [golang, rest-api, go-swagger]
 model:
   model: claude-sonnet-5
-  maxTokens: 64000
-  effort: low
+  maxTokens: 128000   # clamped to the model's 128k output ceiling by internal/llm
+  effort: high
 ---
 You are a senior Go backend engineer …
 ```
@@ -146,7 +150,7 @@ make all        # gen + build_ui + build + test
 ### Containerised (whole factory)
 
 ```bash
-make up                 # build images + start catalog, coordinator, all 7 agents
+make up                 # build images + start catalog, coordinator, all 8 agents
                         # -> web UI at http://localhost:8090
 make kodus-up           # optional: self-hosted Kodus (then scripts/kodus-setup.md)
 
@@ -166,7 +170,9 @@ make down
 To target an existing repo, pass `repoURL`: a local path / `file:///abs/path`
 (the `asf/run-<id>` branch is added to that repo via `git worktree`), or an
 `https://github.com/...` URL (cloned; branch pushed and a PR opened when
-`GITHUB_TOKEN` is set).
+`GITHUB_TOKEN` is set). With `GITHUB_WEBHOOK_SECRET` set and a webhook wired
+(see [scripts/github-webhook.md](scripts/github-webhook.md)), a review left on
+that PR re-enters the factory as another `request_changes` round.
 
 ### On the host (demo script)
 
@@ -174,7 +180,7 @@ To target an existing repo, pass `repoURL`: a local path / `file:///abs/path`
 make demo               # reads ANTHROPIC_API_KEY from .env
 ```
 
-`scripts/demo.sh` starts the catalog + all seven agents + `coordinator serve`,
+`scripts/demo.sh` starts the catalog + all eight agents + `coordinator serve`,
 submits `docs/sample-prd.md` asynchronously, polls the run (auto-approving at the
 human gate), then prints the final status and the per-run workspace's log and
 file list.
@@ -209,14 +215,15 @@ curl -s -X PATCH localhost:8080/v1/agents/backend-developer/model \
 | `internal/agentkit/` | agent bootstrap + `Run` (standard agent main) + executors (`LLMExecutor`, `DispatchExecutor`) |
 | `internal/factory/` | A2A message contracts + plan/verdict/routing helpers (`ParsePlan`, `RouteRole`, `VerdictFor`) shared by coordinator + agents |
 | `internal/workspace/` | per-run repositories: new / `git worktree` of a local repo / clone of a remote (`Manager.Prepare`, `Repo`) |
-| `internal/forge/` | opens a GitHub PR for a pushed branch (`GITHUB_TOKEN`; degrades to no-op) |
+| `internal/forge/` | opens a GitHub PR for a pushed branch (`GITHUB_TOKEN`), and verifies + parses PR-review webhooks (`webhook.go`) |
+| `internal/buildgate/` | `go build`/`go test` + `npm run build` over the workspace → routed `Finding`s |
 | `internal/kodus/` | Kodus CLI wrapper |
 | `internal/sast/` | gosec / govulncheck / npm-audit wrappers |
 | `internal/agents/{devagent,uiux,secreview,codereview}/` | per-role executors |
 | `internal/coordinator/` | the `Run` state machine + drive loop and event log (`coordinator.go`, `run.go`), stage sequencing (`plan.go`), A2A pipeline engine (`pipeline.go`), run store (`store.go`, `runstore/`), SPA serving (`ui/`) |
 | `browser/asf-ui/` | the Vue 3 SPA served by the coordinator |
 | `internal/prd/` | PRD type + Markdown/JSON parsing |
-| `cmd/agent-*` | the seven agent binaries |
+| `cmd/agent-*` | the eight agent binaries (incl. `agent-build-gate`) |
 | `Dockerfile*`, `docker-compose.yml` | the containerised factory |
 | `scripts/kodus-setup.md` | one-time Kodus bootstrap |
 | `docs/ARCHITECTURE.md` | full target design, including later phases |

@@ -15,6 +15,7 @@ const (
 	RoleBackendDeveloper = "backend-developer"
 	RoleFrontendDev      = "frontend-developer"
 	RoleMobileDeveloper  = "mobile-developer"
+	RoleBuildGate        = "build-gate"
 	RoleSecurityReviewer = "security-reviewer"
 	RoleCodeReviewer     = "code-reviewer"
 )

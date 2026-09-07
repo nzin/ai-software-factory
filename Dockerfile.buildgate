@@ -1,0 +1,16 @@
+# build-gate agent: base image + a real Go 1.26 toolchain + Node 22.
+# It runs `go build`/`go test` and `npm run build` against generated code, so it
+# needs current toolchains — not Debian's apt `golang-go` (~1.21) / `nodejs` (18).
+FROM golang:1.26-bookworm AS go
+
+FROM ai-software-factory-base:latest
+COPY --from=go /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-mod=mod
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && go version \
+ && node --version
+CMD ["/app/bin/agent-build-gate"]

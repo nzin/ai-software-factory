@@ -9,9 +9,15 @@ func isReviewer(stage string) bool {
 	return stage == factory.RoleSecurityReviewer || stage == factory.RoleCodeReviewer
 }
 
+// isGate reports whether stage is the deterministic build/test gate. Like a
+// reviewer it can return request_changes and bounce the run to a developer.
+func isGate(stage string) bool {
+	return stage == factory.RoleBuildGate
+}
+
 // plannedStages is the ordered post-planner pipeline for a run, derived from the
 // planner's task list: an optional ui-ux-designer, the developer roles that have
-// tasks, then the two reviewers.
+// tasks, the build gate, then the two reviewers.
 func plannedStages(tasks []factory.PlanTask) []string {
 	devs := developerStages(tasks)
 	var stages []string
@@ -19,6 +25,7 @@ func plannedStages(tasks []factory.PlanTask) []string {
 		stages = append(stages, factory.RoleUIUXDesigner)
 	}
 	stages = append(stages, devs...)
+	stages = append(stages, factory.RoleBuildGate)
 	stages = append(stages, factory.RoleSecurityReviewer, factory.RoleCodeReviewer)
 	return stages
 }
@@ -58,7 +65,8 @@ func firstDevelopmentStage(run *Run) string {
 
 // nextStage returns the stage after run.Stage in the pipeline, or "" when the
 // pipeline is complete. A developer fix pass (Attempts > 0) jumps straight to the
-// security reviewer rather than re-running later developers.
+// build gate rather than re-running later developers; the gate then flows on to
+// the reviewers normally.
 func nextStage(run *Run) string {
 	stages := plannedStages(run.PlanTasks)
 	i := indexOf(stages, run.Stage)
@@ -66,6 +74,9 @@ func nextStage(run *Run) string {
 		return ""
 	}
 	if factory.IsDeveloperRole(run.Stage) && run.Attempts[run.Stage] > 0 {
+		if indexOf(stages, factory.RoleBuildGate) >= 0 {
+			return factory.RoleBuildGate
+		}
 		return factory.RoleSecurityReviewer
 	}
 	if i+1 < len(stages) {

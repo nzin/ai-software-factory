@@ -355,6 +355,39 @@ func init() {
           }
         }
       }
+    },
+    "/v1/webhooks/github": {
+      "post": {
+        "description": "Verifies the X-Hub-Signature-256 HMAC, then turns a PR review or an inline review comment into the same re-entry the in-UI review does: a change request becomes a Finding{source:\"human\"} routed to the responsible developer; an approval accepts the run. There is no request body schema here on purpose — the handler reads the raw body itself for signature verification.\n",
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "GitHub pull-request review webhook",
+        "operationId": "githubWebhook",
+        "responses": {
+          "202": {
+            "description": "accepted (also returned for ignored / unmatched events)"
+          },
+          "401": {
+            "description": "bad or missing signature",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "503": {
+            "description": "webhooks not configured (GITHUB_WEBHOOK_SECRET unset)",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -772,7 +805,7 @@ func init() {
           "format": "int64"
         },
         "kind": {
-          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
+          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | build_failed | pr_comment | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
           "type": "string"
         },
         "message": {
@@ -1256,6 +1289,39 @@ func init() {
           }
         }
       }
+    },
+    "/v1/webhooks/github": {
+      "post": {
+        "description": "Verifies the X-Hub-Signature-256 HMAC, then turns a PR review or an inline review comment into the same re-entry the in-UI review does: a change request becomes a Finding{source:\"human\"} routed to the responsible developer; an approval accepts the run. There is no request body schema here on purpose — the handler reads the raw body itself for signature verification.\n",
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "GitHub pull-request review webhook",
+        "operationId": "githubWebhook",
+        "responses": {
+          "202": {
+            "description": "accepted (also returned for ignored / unmatched events)"
+          },
+          "401": {
+            "description": "bad or missing signature",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "503": {
+            "description": "webhooks not configured (GITHUB_WEBHOOK_SECRET unset)",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
@@ -1673,7 +1739,7 @@ func init() {
           "format": "int64"
         },
         "kind": {
-          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
+          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | build_failed | pr_comment | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
           "type": "string"
         },
         "message": {

@@ -6,6 +6,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -25,9 +26,15 @@ type Client struct {
 // SDK (ANTHROPIC_API_KEY, or an `ant auth login` profile). Extra options can be
 // passed for tests.
 func New(cfg modelext.Config, opts ...option.RequestOption) *Client {
+	cfg = cfg.WithDefaults()
+	if cfg.MaxTokens > maxOutputTokens {
+		log.Printf("llm: maxTokens %d exceeds the model output ceiling — capping at %d",
+			cfg.MaxTokens, maxOutputTokens)
+		cfg.MaxTokens = maxOutputTokens
+	}
 	return &Client{
 		anth: anthropic.NewClient(opts...),
-		cfg:  cfg.WithDefaults(),
+		cfg:  cfg,
 	}
 }
 
@@ -35,11 +42,17 @@ func New(cfg modelext.Config, opts ...option.RequestOption) *Client {
 func (c *Client) Config() modelext.Config { return c.cfg }
 
 const (
+	// maxOutputTokens is the hard output-token ceiling for the current Claude
+	// models (Sonnet 5 / Opus 5). A larger max_tokens is a 400 from the API, and
+	// no beta header lifts it — so New() clamps to this rather than letting a
+	// misconfigured prompt file fail every dispatch.
+	maxOutputTokens = 128_000
 	// streamThreshold is the MaxTokens above which Complete switches to streaming
 	// to avoid HTTP timeouts on long generations.
 	streamThreshold = 24000
-	// callTimeout bounds a single model call so a stalled stream fails fast.
-	callTimeout = 15 * time.Minute
+	// callTimeout bounds a single model call so a stalled stream fails fast. A
+	// high-effort generation near the output ceiling can run 20+ minutes.
+	callTimeout = 30 * time.Minute
 	// idleTimeout fails a stream that goes quiet mid-generation.
 	idleTimeout = 3 * time.Minute
 )

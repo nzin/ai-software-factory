@@ -161,6 +161,82 @@ func TestRequestChangesStopsAtAttemptCap(t *testing.T) {
 	}
 }
 
+// buildKeepsFailing: the build gate never passes and routes to backend; every
+// other non-planner stage approves. Exercises the gate → developer → gate loop.
+type buildKeepsFailing struct{ gateRuns, devRuns int }
+
+func (b *buildKeepsFailing) Run(_ context.Context, run *Run) (StageResult, error) {
+	switch {
+	case run.Stage == "planner":
+		return StageResult{Task: Task{Role: "planner", State: "completed"}, Plan: backendPlan()}, nil
+	case isGate(run.Stage):
+		b.gateRuns++
+		return StageResult{
+			Task: Task{Role: run.Stage, State: "completed", Verdict: factory.VerdictRequestChanges},
+			Findings: []Finding{{
+				Source: "build-gate", Severity: "high", File: "main.go", Line: 3,
+				Title: "undefined: doThing", TargetRole: factory.RoleBackendDeveloper,
+			}},
+			Verdict:    factory.VerdictRequestChanges,
+			TargetRole: factory.RoleBackendDeveloper,
+		}, nil
+	case factory.IsDeveloperRole(run.Stage):
+		b.devRuns++
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}}, nil
+	default:
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+	}
+}
+
+func TestBuildGateBouncesToDeveloperThenCaps(t *testing.T) {
+	eng := &buildKeepsFailing{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil),
+		WithMaxStageIterations(3), WithDefaults(100, time.Hour))
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := waitTerminal(t, o, run.ID)
+
+	if got.Status != StatusNeedsHumanReview {
+		t.Fatalf("status = %s, want needs_human_review (%q)", got.Status, got.Reason)
+	}
+	// Each failed gate bounces to backend, whose fix pass re-runs the gate.
+	if eng.gateRuns < 4 || eng.devRuns < 4 {
+		t.Fatalf("gate/dev loop did not run: gateRuns=%d devRuns=%d", eng.gateRuns, eng.devRuns)
+	}
+	if got.Attempts[factory.RoleBackendDeveloper] <= 3 {
+		t.Fatalf("backend attempts = %d, want > 3", got.Attempts[factory.RoleBackendDeveloper])
+	}
+	if !hasKind(got, EventBuildFailed) {
+		t.Fatalf("no build_failed event: %v", kinds(got))
+	}
+	if hasKind(got, EventRequestChanges) {
+		t.Fatalf("a build-gate bounce should be build_failed, not request_changes: %v", kinds(got))
+	}
+}
+
+func TestBuildGatePassFlowsToReviewers(t *testing.T) {
+	// planThenApprove approves at every non-planner stage, gate included.
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	got := waitTerminal(t, o, run.ID)
+	if got.Status != StatusDone {
+		t.Fatalf("status = %s / %q", got.Status, got.Reason)
+	}
+	roles := make([]string, 0, len(got.Tasks))
+	for _, tk := range got.Tasks {
+		roles = append(roles, tk.Role)
+	}
+	// build-gate must sit between the developer and the reviewers.
+	gi, si := indexOf(roles, factory.RoleBuildGate), indexOf(roles, factory.RoleSecurityReviewer)
+	di := indexOf(roles, factory.RoleBackendDeveloper)
+	if !(di >= 0 && gi > di && si > gi) {
+		t.Fatalf("stage order wrong: %v", roles)
+	}
+}
+
 func TestBudgetStopsInfiniteLoop(t *testing.T) {
 	eng := &alwaysRequestChanges{}
 	o := New(nil, WithEngine(eng), WithWorkspace(nil),
@@ -203,7 +279,10 @@ func TestZeroBudgetDispatchesNothing(t *testing.T) {
 
 func TestPlannedStagesSkipsUnusedRoles(t *testing.T) {
 	got := plannedStages([]factory.PlanTask{{ID: "T1", Role: factory.RoleBackendDeveloper, Title: "api"}})
-	want := []string{factory.RoleBackendDeveloper, factory.RoleSecurityReviewer, factory.RoleCodeReviewer}
+	want := []string{
+		factory.RoleBackendDeveloper, factory.RoleBuildGate,
+		factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
+	}
 	if !equal(got, want) {
 		t.Fatalf("backend-only stages = %v, want %v", got, want)
 	}
@@ -214,7 +293,7 @@ func TestPlannedStagesSkipsUnusedRoles(t *testing.T) {
 	})
 	want = []string{
 		factory.RoleUIUXDesigner, factory.RoleBackendDeveloper, factory.RoleFrontendDev,
-		factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
+		factory.RoleBuildGate, factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
 	}
 	if !equal(got, want) {
 		t.Fatalf("full stages = %v, want %v", got, want)
@@ -232,8 +311,12 @@ func TestNextStageWalksStages(t *testing.T) {
 		Attempts:  map[string]int{},
 	}
 	run.Stage = factory.RoleBackendDeveloper
+	if got := nextStage(run); got != factory.RoleBuildGate {
+		t.Fatalf("after backend: %q, want build-gate", got)
+	}
+	run.Stage = factory.RoleBuildGate
 	if got := nextStage(run); got != factory.RoleSecurityReviewer {
-		t.Fatalf("after backend: %q", got)
+		t.Fatalf("after build-gate: %q", got)
 	}
 	run.Stage = factory.RoleSecurityReviewer
 	if got := nextStage(run); got != factory.RoleCodeReviewer {
@@ -245,7 +328,7 @@ func TestNextStageWalksStages(t *testing.T) {
 	}
 }
 
-func TestNextStageFixPassSkipsToSecurityReviewer(t *testing.T) {
+func TestNextStageFixPassGoesToBuildGate(t *testing.T) {
 	run := &Run{
 		PlanTasks: []factory.PlanTask{
 			{ID: "T1", Role: factory.RoleBackendDeveloper, Title: "api"},
@@ -254,8 +337,8 @@ func TestNextStageFixPassSkipsToSecurityReviewer(t *testing.T) {
 		Attempts: map[string]int{factory.RoleBackendDeveloper: 1},
 		Stage:    factory.RoleBackendDeveloper,
 	}
-	if got := nextStage(run); got != factory.RoleSecurityReviewer {
-		t.Fatalf("fix pass should skip straight to security reviewer, got %q", got)
+	if got := nextStage(run); got != factory.RoleBuildGate {
+		t.Fatalf("fix pass should re-run the build gate first, got %q", got)
 	}
 }
 

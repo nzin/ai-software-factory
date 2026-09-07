@@ -454,6 +454,71 @@ func (o *Orchestrator) Review(id, decision string, comments []ReviewComment) (*R
 	}
 }
 
+// IngestPRReview matches a GitHub PR review event to a run and applies it through
+// the existing Review path. It never fails loudly: an unmatched or stale event
+// returns an error the webhook handler logs and answers 202, so GitHub does not
+// keep retrying.
+func (o *Orchestrator) IngestPRReview(r forge.PRReview) (*Run, error) {
+	run := o.matchPR(r)
+	if run == nil {
+		return nil, fmt.Errorf("coordinator: no run matches PR %s (branch %q)", r.PRURL, r.HeadRef)
+	}
+	if run.Status != StatusPRReady && run.Status != StatusPROpen {
+		return run, fmt.Errorf("coordinator: run %s is %s — ignoring PR review", run.ID, run.Status)
+	}
+
+	if r.State == "approved" {
+		res, err := o.Review(run.ID, ReviewAccept, nil)
+		if err == nil {
+			o.event(res, EventReviewAccepted, res.LastStage,
+				"PR approved on GitHub by %s", orDash(r.Author)).By(ActorHuman)
+			_ = o.store.Put(res)
+		}
+		return res, err
+	}
+
+	comments := make([]ReviewComment, 0, len(r.Comments))
+	for _, c := range r.Comments {
+		comments = append(comments, ReviewComment{Note: c.Body, File: c.Path, Line: c.Line})
+	}
+	if len(comments) == 0 {
+		o.event(run, EventPRComment, run.LastStage,
+			"comment on the PR by %s — no change requested", orDash(r.Author)).By(ActorHuman)
+		_ = o.store.Put(run)
+		return run, nil
+	}
+	res, err := o.Review(run.ID, ReviewRequestChanges, comments)
+	if err == nil {
+		// annotate the event Review just wrote so the timeline shows the source
+		if n := len(res.Events); n > 0 {
+			res.Events[n-1].Detail = "via GitHub PR review by " + orDash(r.Author) + "\n\n" + res.Events[n-1].Detail
+			_ = o.store.Put(res)
+		}
+	}
+	return res, err
+}
+
+// matchPR finds the run this PR event belongs to: exact PR URL first, then the
+// work branch scoped to the same GitHub repo.
+func (o *Orchestrator) matchPR(r forge.PRReview) *Run {
+	runs, _ := o.store.All()
+	if r.PRURL != "" {
+		for _, run := range runs {
+			if run.PRURL == r.PRURL {
+				return run
+			}
+		}
+	}
+	if r.HeadRef != "" && r.RepoFullName != "" {
+		for _, run := range runs {
+			if run.WorkBranch == r.HeadRef && strings.Contains(run.RepoURL, r.RepoFullName) {
+				return run
+			}
+		}
+	}
+	return nil
+}
+
 func renderComments(fs []Finding) string {
 	var b strings.Builder
 	for _, f := range fs {
@@ -565,7 +630,7 @@ func (o *Orchestrator) drive(ctx context.Context, run *Run) {
 			}
 			run.Stage = firstDevelopmentStage(run)
 
-		case isReviewer(stage) && res.Verdict == factory.VerdictRequestChanges:
+		case (isReviewer(stage) || isGate(stage)) && res.Verdict == factory.VerdictRequestChanges:
 			target := res.TargetRole
 			if !factory.IsDeveloperRole(target) {
 				target = factory.RouteRole(res.Findings, run.lastDeveloper())
@@ -573,13 +638,17 @@ func (o *Orchestrator) drive(ctx context.Context, run *Run) {
 			run.Attempts[target]++
 			if run.Attempts[target] > o.maxStageIter {
 				o.event(run, EventAttemptCap, target,
-					"%s still failing review after %d fix attempts", target, o.maxStageIter)
+					"%s still failing after %d fix attempts", target, o.maxStageIter)
 				o.stop(run, StatusNeedsHumanReview,
-					fmt.Sprintf("%s still failing review after %d fix attempts", target, o.maxStageIter))
+					fmt.Sprintf("%s still failing after %d fix attempts", target, o.maxStageIter))
 				return
 			}
-			o.event(run, EventRequestChanges, target,
-				"%s requested changes → back to %s (attempt %d)", stage, target, run.Attempts[target]).
+			kind, verb := EventRequestChanges, "requested changes"
+			if isGate(stage) {
+				kind, verb = EventBuildFailed, "the build failed"
+			}
+			o.event(run, kind, target,
+				"%s: %s → back to %s (attempt %d)", stage, verb, target, run.Attempts[target]).
 				Attempt = run.Attempts[target]
 			run.Stage = target
 

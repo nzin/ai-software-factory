@@ -49,8 +49,9 @@ start frontend-developer     9104 agent-frontend-developer
 start mobile-developer       9105 agent-mobile-developer
 start security-reviewer      9106 agent-security-reviewer
 start code-reviewer          9107 agent-code-reviewer
+start build-gate             9108 agent-build-gate
 
-for p in 9101 9102 9103 9104 9105 9106 9107; do
+for p in 9101 9102 9103 9104 9105 9106 9107 9108; do
   for _ in $(seq 1 50); do
     curl -sf "127.0.0.1:$p/.well-known/agent-card.json" >/dev/null && break
     sleep 0.2

@@ -86,6 +86,8 @@ const (
 	EventApproved         = "approved"
 	EventRejected         = "rejected"
 	EventRequestChanges   = "request_changes"
+	EventBuildFailed      = "build_failed"
+	EventPRComment        = "pr_comment"
 	EventAttemptCap       = "attempt_cap"
 	EventBudgetExhausted  = "budget_exhausted"
 	EventPushed           = "pushed"

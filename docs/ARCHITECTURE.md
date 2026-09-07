@@ -82,7 +82,8 @@ stage order in `plan.go`, A2A dispatch in `pipeline.go`):
 
 ```
 planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mobile}?
-  → security-reviewer → code-reviewer      (request_changes ↺ back to a developer)
+  → build-gate → security-reviewer → code-reviewer   (request_changes / build_failed
+                                                       ↺ back to a developer)
 ```
 
 - The **planner** is handed a repository snapshot (a new/empty marker, or a
@@ -101,14 +102,22 @@ planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mo
   the UI spec, their tasks, and — on a fix pass — the `Findings` + `Attempt`
   count. They write whole files, `git commit`, and return a
   `factory.ResultEnvelope`.
+- **build-gate** (`internal/buildgate`, `agent-build-gate`, no LLM) compiles and
+  tests the workspace — `go build ./...` / `go test ./...` and `npm install` /
+  `npm run build` — and turns any non-zero exit into a `high`
+  `Finding{source:"build-gate"}` routed by file path. A missing toolchain is an
+  `info` finding, never a failure. It needs current Go + Node, so it ships its
+  own `Dockerfile.buildgate` (Go 1.26 + Node 22) rather than reusing
+  `security-reviewer`'s stale Debian toolchains.
 - **security-reviewer** runs `internal/sast` over the workspace plus one LLM pass
   over the diff; **code-reviewer** runs the Kodus CLI. Each returns a `Verdict`
   (`approve` | `request_changes`, derived from finding severity by
   `factory.VerdictFor`) and a `TargetRole`.
-- On `request_changes` the coordinator routes back to a developer
-  (`res.TargetRole`, else `factory.RouteRole`), bumps `Run.Attempts[role]`, and
-  re-runs the reviewers; more than `WithMaxStageIterations` (default 3) attempts
-  on one role → `needs_human_review`.
+- On `request_changes` (or the gate's `build_failed`) the coordinator routes back
+  to a developer (`res.TargetRole`, else `factory.RouteRole`), bumps
+  `Run.Attempts[role]`, and re-runs — a bounced developer's `nextStage` shortcut
+  jumps to the **build gate** so it re-verifies before the reviewers. More than
+  `WithMaxStageIterations` (default 3) attempts on one role → `needs_human_review`.
 - On finish: `HasCommits` uses `merge-base(base, HEAD)..HEAD`. A remote clone
   gets `git push` + a GitHub PR (`internal/forge`, `GITHUB_TOKEN`) →
   `pr_open`/`prURL`, else `pr_ready`; a local worktree / new repo →
@@ -151,14 +160,15 @@ finds an issue → back to the developer → back to the reviewer" is a cycle. T
 happy-path order is just the default transition table:
 
 ```
-planner → ui-ux-designer → { backend, frontend, mobile } → security-reviewer → code-reviewer → PR
+planner → ui-ux-designer → { backend, frontend, mobile } → build-gate → security-reviewer → code-reviewer → PR
 ```
 
-Reviewers return a structured verdict — `approve` or
-`request_changes{targetRole, findings[]}`. On `request_changes` the coordinator
-routes the `Run` back to `targetRole` (a developer for an implementation bug, the
-planner for a design flaw), re-runs the affected reviewers, and repeats — bounded
-by the run budget and a per-stage `maxIterations` local guard.
+The build gate and the reviewers return a structured verdict — `approve` or
+`request_changes{targetRole, findings[]}`. On `request_changes` (or
+`build_failed`) the coordinator routes the `Run` back to `targetRole` (a
+developer for an implementation bug or a broken build, the planner for a design
+flaw), re-runs the gate and the affected reviewers, and repeats — bounded by the
+run budget and a per-role `maxIterations` local guard.
 
 **PR review loop.** When the branch is ready the run enters `pr_ready` (or
 `pr_open` with a real GitHub PR). The human either **accepts** (→ `accepted`,
@@ -181,11 +191,20 @@ verdict on a run in `pr_ready`/`pr_open`. **accept** → `accepted` (terminal).
 **request_changes** turns each comment into a
 `Finding{source:"human", severity:"high"}`, routes it with the same
 `factory.RouteRole` the reviewers use, bumps `Attempts[target]`, and drops the run
-back into `drive` at that developer — a fix pass, the reviewers, and a new
-revision on the same branch. Past `maxStageIter` it parks in
+back into `drive` at that developer — a fix pass, the build gate, the reviewers,
+and a new revision on the same branch. Past `maxStageIter` it parks in
 `needs_human_review` instead. `POST /v1/runs/{id}/resume` un-sticks a parked run:
 it grants budget, **clears `Attempts`** (a run stopped by the retry cap would
 otherwise re-trip at once) and restarts at `Run.LastStage`.
+
+**GitHub PR reviews.** `POST /v1/webhooks/github` (`internal/forge/webhook.go` +
+`Orchestrator.IngestPRReview`) is the same loop, triggered from GitHub instead of
+the UI. It verifies the `X-Hub-Signature-256` HMAC against
+`GITHUB_WEBHOOK_SECRET`, parses a `pull_request_review` /
+`pull_request_review_comment`, matches the run by PR URL (or branch + repo), and
+calls `Review` — an approval accepts, a change request re-enters at a developer.
+Unknown/stale/ignored events are logged and answered `202`. Local setup and the
+webhook config are in `scripts/github-webhook.md`.
 
 **Run event log.** `Run.Events` is the run's audit trail: one `Event{Seq, At,
 Kind, Stage, Status, Message, Detail, Attempt, DurationMs, Actor}` per

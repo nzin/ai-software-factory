@@ -35,7 +35,7 @@ type RunEvent struct {
 	// duration ms
 	DurationMs int64 `json:"durationMs,omitempty"`
 
-	// submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated
+	// submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | build_failed | pr_comment | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated
 	Kind string `json:"kind,omitempty"`
 
 	// message

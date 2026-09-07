@@ -73,16 +73,21 @@ const EVENT_TAG = {
   stage_failed: 'danger',
   budget_exhausted: 'danger',
   attempt_cap: 'danger',
+  build_failed: 'danger',
   awaiting_approval: 'warning',
   request_changes: 'warning',
   review_changes_requested: 'warning',
   recovered: 'warning',
   rejected: 'warning',
+  resumed: 'warning',
   approved: 'success',
   review_accepted: 'success',
   pr_opened: 'success',
   finished: 'success',
   stage_completed: 'primary',
+  pushed: 'primary',
+  submitted: 'info',
+  pr_comment: 'info',
 }
 
 export function eventTagType(kind) {

@@ -5,8 +5,8 @@ skills: [vuejs, vue3, typescript, spa, frontend, axios]
 model:
   provider: anthropic
   model: claude-sonnet-5
-  maxTokens: 64000
-  effort: low
+  maxTokens: 128000
+  effort: high
   thinking: adaptive
 ---
 You are a senior frontend engineer on an automated software factory.

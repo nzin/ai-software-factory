@@ -3,6 +3,9 @@ package coordinator
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +18,7 @@ import (
 	"github.com/nzin/ai-software-factory/internal/agentkit"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations"
+	"github.com/nzin/ai-software-factory/internal/factory"
 	"github.com/nzin/ai-software-factory/internal/modelext"
 	"github.com/nzin/ai-software-factory/internal/prd"
 )
@@ -211,5 +215,95 @@ func TestGetRunExposesEventsAndSteps(t *testing.T) {
 	tasks, _ := got["tasks"].([]any)
 	if len(tasks) == 0 {
 		t.Fatal("run detail carries no tasks")
+	}
+}
+
+func ghSign(secret string, body []byte) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write(body)
+	return "sha256=" + hex.EncodeToString(m.Sum(nil))
+}
+
+func postWebhook(t *testing.T, url, event, sig string, body []byte) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url+"/v1/webhooks/github", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Event", event)
+	if sig != "" {
+		req.Header.Set("X-Hub-Signature-256", sig)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+func TestGithubWebhookAuth(t *testing.T) {
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil))
+	srv := serve(t, o)
+	body := []byte(`{"action":"submitted"}`)
+
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "")
+	if code := postWebhook(t, srv.URL, "pull_request_review", "", body); code != http.StatusServiceUnavailable {
+		t.Fatalf("no secret: code = %d, want 503", code)
+	}
+
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "topsecret")
+	if code := postWebhook(t, srv.URL, "pull_request_review", "sha256=deadbeef", body); code != http.StatusUnauthorized {
+		t.Fatalf("bad signature: code = %d, want 401", code)
+	}
+	if code := postWebhook(t, srv.URL, "ping", ghSign("topsecret", body), body); code != http.StatusAccepted {
+		t.Fatalf("valid ping: code = %d, want 202", code)
+	}
+}
+
+func TestGithubWebhookRoutesAChangeRequest(t *testing.T) {
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "topsecret")
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil))
+	srv := serve(t, o)
+
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	driveToPRReady(t, o, run.ID)
+	// give it a PR URL so the webhook can match it
+	stored, _, _ := o.store.Get(run.ID)
+	stored.Status = StatusPROpen
+	stored.PRURL = "https://github.com/me/repo/pull/9"
+	_ = o.store.Put(stored)
+
+	payload := []byte(`{
+	  "action":"submitted",
+	  "review":{"body":"handle the empty case","state":"changes_requested","user":{"login":"octo"}},
+	  "pull_request":{"html_url":"https://github.com/me/repo/pull/9","head":{"ref":"asf/run-x"}},
+	  "repository":{"full_name":"me/repo"}
+	}`)
+	if code := postWebhook(t, srv.URL, "pull_request_review", ghSign("topsecret", payload), payload); code != http.StatusAccepted {
+		t.Fatalf("code = %d, want 202", code)
+	}
+
+	// The prReady fake approves every stage, so the re-entered run races back
+	// through the pipeline; assert on the outcome, not a transient stage.
+	got := waitTerminal(t, o, run.ID)
+	var human bool
+	var reentered bool
+	for _, f := range got.Findings {
+		if f.Source == "human" && f.Title == "handle the empty case" {
+			human = true
+		}
+	}
+	for _, e := range got.Events {
+		if e.Kind == EventReviewChanges && e.Actor == ActorHuman {
+			reentered = true
+		}
+	}
+	if !human {
+		t.Fatalf("no human finding from the webhook: %+v", got.Findings)
+	}
+	if !reentered {
+		t.Fatalf("webhook did not drive a review re-entry: %v", kinds(got))
+	}
+	if got.Attempts[factory.RoleBackendDeveloper] != 1 {
+		t.Fatalf("expected one backend fix attempt, got %v", got.Attempts)
 	}
 }

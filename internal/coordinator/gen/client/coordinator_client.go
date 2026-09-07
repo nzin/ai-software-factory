@@ -11,6 +11,7 @@ import (
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/agents"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/runs"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/webhooks"
 )
 
 // Default coordinator HTTP client.
@@ -59,6 +60,7 @@ func New(transport runtime.ContextualTransport, formats strfmt.Registry) *Coordi
 	cli.Agents = agents.New(transport, formats)
 	cli.Health = health.New(transport, formats)
 	cli.Runs = runs.New(transport, formats)
+	cli.Webhooks = webhooks.New(transport, formats)
 
 	return cli
 }
@@ -124,6 +126,8 @@ type Coordinator struct {
 
 	Runs runs.ClientService
 
+	Webhooks webhooks.ClientService
+
 	Transport runtime.ContextualTransport
 }
 
@@ -133,4 +137,5 @@ func (c *Coordinator) SetTransport(transport runtime.ContextualTransport) {
 	c.Agents.SetTransport(transport)
 	c.Health.SetTransport(transport)
 	c.Runs.SetTransport(transport)
+	c.Webhooks.SetTransport(transport)
 }

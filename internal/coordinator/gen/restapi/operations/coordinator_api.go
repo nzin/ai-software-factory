@@ -18,6 +18,7 @@ import (
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/agents"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/runs"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/webhooks"
 )
 
 // NewCoordinatorAPI creates a new Coordinator instance
@@ -58,6 +59,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation runs.GetRun has not yet been implemented")
+		}),
+
+		WebhooksGithubWebhookHandler: webhooks.GithubWebhookHandlerFunc(func(params webhooks.GithubWebhookParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation webhooks.GithubWebhook has not yet been implemented")
 		}),
 
 		HealthHealthHandler: health.HealthHandlerFunc(func(params health.HealthParams) middleware.Responder {
@@ -143,6 +150,8 @@ type CoordinatorAPI struct {
 	AgentsGetAgentDetailHandler agents.GetAgentDetailHandler
 	// RunsGetRunHandler sets the operation handler for the get run operation
 	RunsGetRunHandler runs.GetRunHandler
+	// WebhooksGithubWebhookHandler sets the operation handler for the github webhook operation
+	WebhooksGithubWebhookHandler webhooks.GithubWebhookHandler
 	// HealthHealthHandler sets the operation handler for the health operation
 	HealthHealthHandler health.HealthHandler
 	// AgentsListAgentsHandler sets the operation handler for the list agents operation
@@ -242,6 +251,9 @@ func (o *CoordinatorAPI) Validate() error {
 	}
 	if o.RunsGetRunHandler == nil {
 		unregistered = append(unregistered, "runs.GetRunHandler")
+	}
+	if o.WebhooksGithubWebhookHandler == nil {
+		unregistered = append(unregistered, "webhooks.GithubWebhookHandler")
 	}
 	if o.HealthHealthHandler == nil {
 		unregistered = append(unregistered, "health.HealthHandler")
@@ -366,6 +378,10 @@ func (o *CoordinatorAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/v1/runs/{id}"] = runs.NewGetRun(o.context, o.RunsGetRunHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/v1/webhooks/github"] = webhooks.NewGithubWebhook(o.context, o.WebhooksGithubWebhookHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

@@ -57,6 +57,8 @@ services:
       ASF_BASE_BRANCH: ${ASF_BASE_BRANCH:-main}
       # Optional: open a GitHub PR when a run targets a github.com remote.
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # Optional: shared secret for POST /v1/webhooks/github (see scripts/github-webhook.md).
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
 
   agent-planner:
     <<: *agent
@@ -77,6 +79,14 @@ services:
   agent-mobile-developer:
     <<: *agent
     command: ["/app/bin/agent-mobile-developer", "--addr", ":9105", "--public-url", "http://agent-mobile-developer:9105"]
+
+  agent-build-gate:
+    <<: *agent
+    build:
+      context: .
+      dockerfile: Dockerfile.buildgate
+    image: ai-software-factory-buildgate:latest
+    command: ["/app/bin/agent-build-gate", "--addr", ":9108", "--public-url", "http://agent-build-gate:9108"]
 
   agent-security-reviewer:
     <<: *agent

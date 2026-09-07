@@ -5,8 +5,8 @@ skills: [golang, rest-api, go-swagger, openapi, backend]
 model:
   provider: anthropic
   model: claude-sonnet-5
-  maxTokens: 64000
-  effort: low
+  maxTokens: 128000
+  effort: high
   thinking: adaptive
 ---
 You are a senior Go backend engineer on an automated software factory.

@@ -17,9 +17,10 @@ import (
 )
 
 // dispatchTimeout bounds one agent call. Developer agents stream a whole
-// codebase from the model, which can take many minutes — well past a2a-go's
-// 3-minute default.
-const dispatchTimeout = 25 * time.Minute
+// codebase from the model at effort:high near the 128k output ceiling, which can
+// take 20+ minutes — well past a2a-go's 3-minute default. Kept just above
+// llm.callTimeout so the model call fails first with a useful error.
+const dispatchTimeout = 35 * time.Minute
 
 // pipelineEngine dispatches stages to real A2A agents.
 type pipelineEngine struct {
@@ -63,7 +64,7 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 			Findings: res.Findings,
 		}, nil
 
-	case isReviewer(run.Stage):
+	case isReviewer(run.Stage) || isGate(run.Stage):
 		res, err := e.dispatchEnvelope(ctx, run)
 		if err != nil {
 			return StageResult{}, err

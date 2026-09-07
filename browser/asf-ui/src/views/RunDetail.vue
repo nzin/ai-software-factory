@@ -7,6 +7,7 @@ import { apiError, notifyError } from '@/api/client'
 import { usePolling } from '@/composables/usePolling'
 import StatusTag from '@/components/StatusTag.vue'
 import EventTimeline from '@/components/EventTimeline.vue'
+import RevisionList from '@/components/RevisionList.vue'
 import StageCard from '@/components/StageCard.vue'
 import FindingsTable from '@/components/FindingsTable.vue'
 import MarkdownBlock from '@/components/MarkdownBlock.vue'
@@ -27,6 +28,14 @@ const busy = ref(false)
 const canApprove = computed(() => run.value.status === 'awaiting_approval')
 const canResume = computed(() => run.value.status === 'needs_human_review')
 const canReview = computed(() => ['pr_ready', 'pr_open'].includes(run.value.status))
+
+// Show the revisions tab once there is a PR or more than one branch-ready cycle.
+const showRevisions = computed(() => {
+  if (run.value.prURL) return true
+  return (run.value.events || []).filter(
+    (e) => e.kind === 'finished' && ['pr_ready', 'pr_open'].includes(e.status),
+  ).length > 0
+})
 
 // --- dialogs ---
 const reject = reactive({ open: false, feedback: '', abandon: false })
@@ -165,6 +174,10 @@ const removeComment = (i) => review.comments.splice(i, 1)
       <el-tabs v-model="tab" class="tabs">
         <el-tab-pane label="Timeline" name="timeline">
           <EventTimeline :events="run.events || []" />
+        </el-tab-pane>
+
+        <el-tab-pane v-if="showRevisions" label="Revisions" name="revisions">
+          <RevisionList :events="run.events || []" />
         </el-tab-pane>
 
         <el-tab-pane :label="`Steps (${(run.tasks || []).length})`" name="steps">

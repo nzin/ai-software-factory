@@ -2,6 +2,9 @@ package coordinator
 
 import (
 	"context"
+	"io"
+	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -15,6 +18,8 @@ import (
 	agentsops "github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/agents"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/runs"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/webhooks"
+	"github.com/nzin/ai-software-factory/internal/forge"
 	"github.com/nzin/ai-software-factory/internal/modelext"
 	"github.com/nzin/ai-software-factory/internal/prd"
 )
@@ -138,6 +143,39 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 			return runs.NewReviewRunDefault(409).WithPayload(&models.Error{Message: swag.String(err.Error())})
 		}
 		return runs.NewReviewRunOK().WithPayload(runToAPI(r))
+	})
+
+	api.WebhooksGithubWebhookHandler = webhooks.GithubWebhookHandlerFunc(func(p webhooks.GithubWebhookParams) middleware.Responder {
+		errBody := func(msg string) *models.Error { return &models.Error{Message: swag.String(msg)} }
+
+		secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+		if secret == "" {
+			return webhooks.NewGithubWebhookServiceUnavailable().
+				WithPayload(errBody("webhooks not configured (set GITHUB_WEBHOOK_SECRET)"))
+		}
+		raw, err := io.ReadAll(io.LimitReader(p.HTTPRequest.Body, 5<<20))
+		if err != nil {
+			return webhooks.NewGithubWebhookDefault(400).WithPayload(errBody("could not read body"))
+		}
+		if !forge.VerifySignature(secret, raw, p.HTTPRequest.Header.Get("X-Hub-Signature-256")) {
+			return webhooks.NewGithubWebhookUnauthorized().WithPayload(errBody("bad or missing signature"))
+		}
+
+		event := p.HTTPRequest.Header.Get("X-GitHub-Event")
+		review, ok, err := forge.ParsePRReview(event, raw)
+		if err != nil {
+			log.Printf("coordinator: webhook %s: %v", event, err)
+			return webhooks.NewGithubWebhookAccepted()
+		}
+		if !ok {
+			return webhooks.NewGithubWebhookAccepted() // ping, opened, empty comment, …
+		}
+		if r, err := o.IngestPRReview(*review); err != nil {
+			log.Printf("coordinator: webhook %s for PR %s: %v", event, review.PRURL, err)
+		} else {
+			log.Printf("coordinator: webhook %s → run %s now %s", event, r.ID, r.Status)
+		}
+		return webhooks.NewGithubWebhookAccepted()
 	})
 
 	api.AgentsListAgentsHandler = agentsops.ListAgentsHandlerFunc(func(p agentsops.ListAgentsParams) middleware.Responder {
