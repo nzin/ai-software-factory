@@ -50,7 +50,7 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 		run.UISpec = res.Summary
 		return StageResult{Task: Task{Role: run.Stage, State: "completed", Summary: "UI/UX spec produced"}}, nil
 
-	case factory.IsDeveloperRole(run.Stage):
+	case factory.IsDeveloperRole(run.Stage) || run.Stage == factory.RoleTestEngineer:
 		res, err := e.dispatchEnvelope(ctx, run)
 		if err != nil {
 			return StageResult{}, err
@@ -96,7 +96,7 @@ func (e *pipelineEngine) plannerInput(ctx context.Context, run *Run) string {
 	var b string
 	switch run.RepoKind {
 	case string(workspace.KindNew):
-		b = "# Repository\n\nThis is a **brand-new empty repository**. Your first task MUST scaffold it (module/manifest, README, .gitignore, minimal CI).\n"
+		b = "# Repository\n\nThis is a **brand-new empty repository**. Your first task MUST scaffold it (module/manifest, README, .gitignore, minimal CI, a Dockerfile for the primary service, and a root docker-compose.yml).\n"
 	default:
 		b = fmt.Sprintf("# Repository (existing, branch %s)\n\nFiles:\n%s\n", run.BaseBranch, bullet(s.Tree))
 		if s.ReadmeHead != "" {

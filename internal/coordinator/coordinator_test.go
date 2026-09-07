@@ -229,11 +229,71 @@ func TestBuildGatePassFlowsToReviewers(t *testing.T) {
 	for _, tk := range got.Tasks {
 		roles = append(roles, tk.Role)
 	}
-	// build-gate must sit between the developer and the reviewers.
-	gi, si := indexOf(roles, factory.RoleBuildGate), indexOf(roles, factory.RoleSecurityReviewer)
+	// test-engineer then build-gate must sit between the developer and the reviewers.
 	di := indexOf(roles, factory.RoleBackendDeveloper)
-	if !(di >= 0 && gi > di && si > gi) {
+	ti := indexOf(roles, factory.RoleTestEngineer)
+	gi := indexOf(roles, factory.RoleBuildGate)
+	si := indexOf(roles, factory.RoleSecurityReviewer)
+	if !(di >= 0 && ti > di && gi > ti && si > gi) {
 		t.Fatalf("stage order wrong: %v", roles)
+	}
+}
+
+// testEngineerThenGate: test-engineer commits; build-gate then fails a component
+// test once and routes to the backend developer; after the fix the gate passes.
+type testEngineerThenGate struct{ teRuns, gateRuns, devFix int }
+
+func (e *testEngineerThenGate) Run(_ context.Context, run *Run) (StageResult, error) {
+	switch {
+	case run.Stage == "planner":
+		return StageResult{Task: Task{Role: "planner", State: "completed"}, Plan: backendPlan()}, nil
+	case run.Stage == factory.RoleTestEngineer:
+		e.teRuns++
+		return StageResult{Task: Task{Role: run.Stage, State: "completed", CommitSHA: "abc123", FilesWritten: []string{"test/component/main.go", "docker-compose.yml"}}}, nil
+	case isGate(run.Stage):
+		e.gateRuns++
+		if e.gateRuns == 1 {
+			return StageResult{
+				Task:       Task{Role: run.Stage, State: "completed", Verdict: factory.VerdictRequestChanges},
+				Findings:   []Finding{{Source: "build-gate", Severity: "high", Category: "component-test", Title: "POST /x returns 500 for empty body, expected 400", TargetRole: factory.RoleBackendDeveloper}},
+				Verdict:    factory.VerdictRequestChanges,
+				TargetRole: factory.RoleBackendDeveloper,
+			}, nil
+		}
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+	case factory.IsDeveloperRole(run.Stage):
+		if run.Attempts[run.Stage] > 0 {
+			e.devFix++
+		}
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}}, nil
+	default:
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+	}
+}
+
+func TestComponentTestFailureRoutesToDeveloperThenReVerifies(t *testing.T) {
+	eng := &testEngineerThenGate{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	got := waitTerminal(t, o, run.ID)
+
+	if got.Status != StatusDone {
+		t.Fatalf("status = %s / %q", got.Status, got.Reason)
+	}
+	if eng.teRuns != 1 {
+		t.Fatalf("test-engineer ran %d times, want 1", eng.teRuns)
+	}
+	if eng.gateRuns != 2 {
+		t.Fatalf("build gate ran %d times, want 2 (fail, then re-verify)", eng.gateRuns)
+	}
+	if eng.devFix != 1 {
+		t.Fatalf("developer fix passes = %d, want 1", eng.devFix)
+	}
+	if got.Attempts[factory.RoleBackendDeveloper] != 1 {
+		t.Fatalf("attempts = %v", got.Attempts)
+	}
+	if !hasKind(got, EventBuildFailed) {
+		t.Fatalf("component-test failure should emit a build_failed event: %v", kinds(got))
 	}
 }
 
@@ -280,7 +340,7 @@ func TestZeroBudgetDispatchesNothing(t *testing.T) {
 func TestPlannedStagesSkipsUnusedRoles(t *testing.T) {
 	got := plannedStages([]factory.PlanTask{{ID: "T1", Role: factory.RoleBackendDeveloper, Title: "api"}})
 	want := []string{
-		factory.RoleBackendDeveloper, factory.RoleBuildGate,
+		factory.RoleBackendDeveloper, factory.RoleTestEngineer, factory.RoleBuildGate,
 		factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
 	}
 	if !equal(got, want) {
@@ -293,7 +353,8 @@ func TestPlannedStagesSkipsUnusedRoles(t *testing.T) {
 	})
 	want = []string{
 		factory.RoleUIUXDesigner, factory.RoleBackendDeveloper, factory.RoleFrontendDev,
-		factory.RoleBuildGate, factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
+		factory.RoleTestEngineer, factory.RoleBuildGate,
+		factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
 	}
 	if !equal(got, want) {
 		t.Fatalf("full stages = %v, want %v", got, want)
@@ -311,8 +372,12 @@ func TestNextStageWalksStages(t *testing.T) {
 		Attempts:  map[string]int{},
 	}
 	run.Stage = factory.RoleBackendDeveloper
+	if got := nextStage(run); got != factory.RoleTestEngineer {
+		t.Fatalf("after backend: %q, want test-engineer", got)
+	}
+	run.Stage = factory.RoleTestEngineer
 	if got := nextStage(run); got != factory.RoleBuildGate {
-		t.Fatalf("after backend: %q, want build-gate", got)
+		t.Fatalf("after test-engineer: %q, want build-gate", got)
 	}
 	run.Stage = factory.RoleBuildGate
 	if got := nextStage(run); got != factory.RoleSecurityReviewer {

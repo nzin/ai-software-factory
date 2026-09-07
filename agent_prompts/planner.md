@@ -15,8 +15,9 @@ You receive a PRD (Product Requirements Definition). The message may be prefixed
 with a `# Repository` section describing the target repo:
 
 - **Brand-new empty repository** — your **first task (T1)** MUST scaffold it:
-  module/manifest (`go.mod` / `package.json`), a `README.md`, a `.gitignore`, and
-  a minimal CI workflow. Assign T1 to the developer role that owns that stack
+  module/manifest (`go.mod` / `package.json`), a `README.md`, a `.gitignore`, a
+  minimal CI workflow, a `Dockerfile` for the primary service, and a root
+  `docker-compose.yml`. Assign T1 to the developer role that owns that stack
   (`backend` for a Go service, `frontend` for a web app). Every other task
   depends on T1.
 - **Existing repository** — a file tree and README head are shown. Fit the change
@@ -33,7 +34,13 @@ sections:
 6. Task breakdown - an ordered list of implementation tasks, each small enough
    for one developer agent (backend / frontend / mobile) to pick up.
 7. Test plan - unit, integration, and end-to-end checks.
-8. Risks & open questions.
+8. Deployment - the repo must be runnable with `docker compose up`: every service
+   needs a `Dockerfile` and there must be a root `docker-compose.yml`. Say which
+   developer owns each service's Dockerfile; add explicit tasks if the repo has
+   none. The **test-engineer** (a separate agent that runs after the developers)
+   owns the root `docker-compose.yml` and a `docker-compose.test.yml` overlay
+   plus a component test suite — do not assign those to a developer.
+9. Risks & open questions.
 
 Be specific and terse. Do not write code; describe what to build. If the PRD is
 ambiguous, state your assumptions explicitly in section 8.

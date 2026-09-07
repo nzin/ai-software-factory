@@ -80,6 +80,10 @@ services:
     <<: *agent
     command: ["/app/bin/agent-mobile-developer", "--addr", ":9105", "--public-url", "http://agent-mobile-developer:9105"]
 
+  agent-test-engineer:
+    <<: *agent
+    command: ["/app/bin/agent-test-engineer", "--addr", ":9109", "--public-url", "http://agent-test-engineer:9109"]
+
   agent-build-gate:
     <<: *agent
     build:
@@ -87,6 +91,13 @@ services:
       dockerfile: Dockerfile.buildgate
     image: ai-software-factory-buildgate:latest
     command: ["/app/bin/agent-build-gate", "--addr", ":9108", "--public-url", "http://agent-build-gate:9108"]
+    # The gate runs `docker compose up` for the component tests against the host
+    # daemon. This gives LLM-authored Dockerfiles/compose files control of that
+    # daemon — run the factory in a disposable VM. Mitigations: per-run compose
+    # project name + unconditional teardown, and a hard timeout in the gate.
+    volumes:
+      - factory-workspace:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
 
   agent-security-reviewer:
     <<: *agent

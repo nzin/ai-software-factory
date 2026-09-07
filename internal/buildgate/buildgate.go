@@ -1,7 +1,8 @@
-// Package buildgate compiles and tests a per-run workspace and turns any
-// failure into routed factory.Finding values. Like internal/sast and
-// internal/kodus it never returns a hard error: a missing toolchain becomes one
-// informational finding so the pipeline still completes.
+// Package buildgate compiles and tests a per-run workspace, validates its
+// docker-compose deployment, and runs the component test suite over
+// `docker compose up`. Every failure becomes a routed factory.Finding. Like
+// internal/sast and internal/kodus it never returns a hard error: a missing
+// toolchain becomes one informational finding so the pipeline still completes.
 package buildgate
 
 import (
@@ -19,56 +20,102 @@ import (
 	"github.com/nzin/ai-software-factory/internal/factory"
 )
 
-// budget bounds the whole gate. npm install for a component library plus
-// `go test ./...` is the slow part; a hang past this is itself a failure.
-const budget = 8 * time.Minute
+const (
+	// budget bounds the whole gate. `docker compose up --build` of a Go+Vue
+	// stack plus `go test ./...` is the slow part; a hang past this is a failure.
+	budget = 20 * time.Minute
+	// composeStep bounds the component-test compose run on its own.
+	composeStep = 14 * time.Minute
+	// maxDetail caps the toolchain output attached to a finding.
+	maxDetail = 3000
+	// maxFailBytes caps the raw output handed to the LLM per failure.
+	maxFailBytes = 12_000
+)
 
-// maxDetail caps the toolchain output attached to a finding.
-const maxDetail = 3000
+// Failure is one command that exited non-zero, kept so the agent's LLM pass can
+// summarise it into tighter findings.
+type Failure struct {
+	Kind        string // "go build" | "go test" | "npm run build" | "compose config" | "component tests"
+	Output      string
+	DefaultRole string
+}
 
-// Check builds and tests everything under dir. The returned findings feed
-// factory.VerdictFor / RouteRole in the calling agent.
-func Check(ctx context.Context, dir string) ([]factory.Finding, string) {
+// Result is what Check returns: the deterministic findings (file:line anchors),
+// a one-line summary, and the raw failures.
+type Result struct {
+	Findings []factory.Finding
+	Summary  string
+	Failures []Failure
+}
+
+// Check builds, tests, validates deployment and runs component tests under dir.
+// runID scopes the compose project name so concurrent runs stay isolated.
+// changed is the run's changed-file list (vs the base branch); when it names
+// only non-code files the deployment + component checks are skipped.
+func Check(ctx context.Context, runID, dir string, changed []string) Result {
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	goDir := goModuleDir(dir)
 	nodeDirs := packageDirs(dir)
-
 	haveGo := goDir != "" && lookPath("go")
 	haveNode := len(nodeDirs) > 0 && lookPath("npm")
 
 	if !haveGo && !haveNode {
-		return []factory.Finding{{
-			Source:   "build-gate",
-			Severity: "info",
-			Title:    "build gate skipped: no Go or Node toolchain available",
-		}}, "build gate skipped (no toolchain)"
+		return Result{
+			Findings: []factory.Finding{{
+				Source:   "build-gate",
+				Severity: "info",
+				Title:    "build gate skipped: no Go or Node toolchain available",
+			}},
+			Summary: "build gate skipped (no toolchain)",
+		}
 	}
 
-	var findings []factory.Finding
+	c := &checker{dir: dir}
 	var ran []string
 
 	if haveGo {
 		ran = append(ran, "go")
-		findings = append(findings, checkGo(ctx, goDir)...)
+		c.checkGo(ctx, goDir)
 	}
 	for _, nd := range nodeDirs {
 		if !haveNode {
 			break
 		}
 		ran = append(ran, "npm("+shortRel(dir, nd)+")")
-		findings = append(findings, checkNode(ctx, nd)...)
+		c.checkNode(ctx, nd)
+	}
+
+	// Deployment + component tests only make sense for a runnable service that
+	// the change actually touches, and only once the code compiles.
+	if hasService(goDir, nodeDirs) && isCodeChange(changed) && lookPath("docker") {
+		ran = append(ran, "compose")
+		c.checkCompose(ctx, dir)
+		if len(c.findings) == 0 && hasFile(dir, "docker-compose.test.yml") {
+			ran = append(ran, "component")
+			c.checkComponent(ctx, runID, dir)
+		}
 	}
 
 	summary := "build gate: " + strings.Join(ran, ", ")
-	switch {
-	case len(findings) == 0:
+	if len(c.findings) == 0 {
 		summary += " — clean"
-	default:
-		summary += " — " + strconv.Itoa(len(findings)) + " problem(s)"
+	} else {
+		summary += " — " + strconv.Itoa(len(c.findings)) + " problem(s)"
 	}
-	return findings, summary
+	return Result{Findings: c.findings, Summary: summary, Failures: c.failures}
+}
+
+type checker struct {
+	dir      string
+	findings []factory.Finding
+	failures []Failure
+}
+
+func (c *checker) add(f factory.Finding) { c.findings = append(c.findings, f) }
+func (c *checker) fail(kind, out, role string) {
+	c.failures = append(c.failures, Failure{Kind: kind, Output: clip(out, maxFailBytes), DefaultRole: role})
 }
 
 // --- Go ---
@@ -76,20 +123,24 @@ func Check(ctx context.Context, dir string) ([]factory.Finding, string) {
 // goErrLine matches `path/file.go:12:5: message` and `path/file.go:12: message`.
 var goErrLine = regexp.MustCompile(`^(\S+\.go):(\d+)(?::\d+)?:\s+(.*)$`)
 
-func checkGo(ctx context.Context, dir string) []factory.Finding {
+func (c *checker) checkGo(ctx context.Context, dir string) {
 	if out, ok := run(ctx, dir, nil, "go", "build", "./..."); !ok {
-		if fs := parseGoErrors(out); len(fs) > 0 {
-			return fs
-		}
-		return []factory.Finding{buildFinding("go build failed", out, factory.RoleBackendDeveloper)}
+		c.fail("go build", out, factory.RoleBackendDeveloper)
+		c.goFindings("go build failed", out)
+		return
 	}
 	if out, ok := run(ctx, dir, nil, "go", "test", "./..."); !ok {
-		if fs := parseGoErrors(out); len(fs) > 0 {
-			return fs
-		}
-		return []factory.Finding{buildFinding("go test failed", out, factory.RoleBackendDeveloper)}
+		c.fail("go test", out, factory.RoleBackendDeveloper)
+		c.goFindings("go test failed", out)
 	}
-	return nil
+}
+
+func (c *checker) goFindings(title, out string) {
+	if fs := parseGoErrors(out); len(fs) > 0 {
+		c.findings = append(c.findings, fs...)
+		return
+	}
+	c.add(buildFinding(title, out, factory.RoleBackendDeveloper))
 }
 
 func parseGoErrors(out string) []factory.Finding {
@@ -125,7 +176,7 @@ func parseGoErrors(out string) []factory.Finding {
 
 // --- Node ---
 
-func checkNode(ctx context.Context, dir string) []factory.Finding {
+func (c *checker) checkNode(ctx context.Context, dir string) {
 	scripts, rn := readPackage(dir)
 	role := factory.RoleFrontendDev
 	if rn {
@@ -133,19 +184,23 @@ func checkNode(ctx context.Context, dir string) []factory.Finding {
 	}
 
 	if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "install", "--no-audit", "--no-fund"); !ok {
-		return []factory.Finding{buildFinding("npm install failed", out, role)}
+		c.fail("npm install", out, role)
+		c.add(buildFinding("npm install failed", out, role))
+		return
 	}
 	if _, has := scripts["build"]; has {
 		if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "run", "build"); !ok {
-			return []factory.Finding{buildFinding("npm run build failed", out, role)}
+			c.fail("npm run build", out, role)
+			c.add(buildFinding("npm run build failed", out, role))
+			return
 		}
 	}
 	if s, has := scripts["test"]; has && !isPlaceholderTest(s) {
 		if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "test"); !ok {
-			return []factory.Finding{buildFinding("npm test failed", out, role)}
+			c.fail("npm test", out, role)
+			c.add(buildFinding("npm test failed", out, role))
 		}
 	}
-	return nil
 }
 
 func readPackage(dir string) (scripts map[string]string, reactNative bool) {
@@ -174,9 +229,126 @@ func isPlaceholderTest(s string) bool {
 	return strings.Contains(s, "no test specified")
 }
 
+// --- deployment ---
+
+var composeNames = []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+
+func composeFile(dir string) string {
+	for _, n := range composeNames {
+		if hasFile(dir, n) {
+			return n
+		}
+	}
+	return ""
+}
+
+func (c *checker) checkCompose(ctx context.Context, dir string) {
+	file := composeFile(dir)
+	if file == "" {
+		c.add(factory.Finding{
+			Source:     "build-gate",
+			Severity:   "high",
+			Category:   "deploy",
+			Title:      "no root docker-compose.yml — the feature can't be deployed with `docker compose up`",
+			Suggestion: "add a root docker-compose.yml wiring the service Dockerfile(s), with a healthcheck on the app service",
+			TargetRole: factory.RoleBackendDeveloper,
+		})
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if out, ok := run(cctx, dir, nil, "docker", "compose", "-f", file, "config", "-q"); !ok {
+		c.fail("compose config", out, factory.RoleBackendDeveloper)
+		c.add(factory.Finding{
+			Source:     "build-gate",
+			Severity:   "high",
+			Category:   "deploy",
+			File:       file,
+			Title:      "docker-compose.yml is not valid",
+			Suggestion: tail(out, maxDetail),
+			TargetRole: factory.RoleBackendDeveloper,
+		})
+	}
+}
+
+// checkComponent runs the tester service in the compose stack and treats its
+// exit code as the verdict. It always tears the stack down.
+func (c *checker) checkComponent(ctx context.Context, runID, dir string) {
+	base := composeFile(dir)
+	proj := "asf-" + shortID(runID)
+	files := []string{"-p", proj, "-f", base, "-f", "docker-compose.test.yml"}
+
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer dcancel()
+		down := append([]string{"compose"}, files...)
+		down = append(down, "down", "-v", "--remove-orphans", "--rmi", "local")
+		_, _ = run(dctx, dir, nil, "docker", down...)
+	}()
+
+	cctx, cancel := context.WithTimeout(ctx, composeStep)
+	defer cancel()
+	up := append([]string{"compose"}, files...)
+	up = append(up, "up", "--build", "--quiet-pull", "--abort-on-container-exit", "--exit-code-from", "tester")
+	if out, ok := run(cctx, dir, nil, "docker", up...); !ok {
+		c.fail("component tests", out, factory.RoleBackendDeveloper)
+		c.add(factory.Finding{
+			Source:     "build-gate",
+			Severity:   "high",
+			Category:   "component-test",
+			Title:      "component tests failed against the running stack",
+			Suggestion: tail(out, maxDetail),
+			TargetRole: factory.RoleBackendDeveloper,
+		})
+	}
+}
+
+var codeExt = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".vue": true,
+	".py": true, ".rb": true, ".java": true, ".rs": true, ".mjs": true, ".cjs": true,
+}
+
+// isCodeChange reports whether the change touches source or deployment config
+// (vs. a docs-only change). A nil list (couldn't diff) is treated as a code
+// change so the checks still run.
+func isCodeChange(changed []string) bool {
+	if changed == nil {
+		return true
+	}
+	for _, f := range changed {
+		b := filepath.Base(f)
+		if codeExt[strings.ToLower(filepath.Ext(f))] ||
+			b == "go.mod" || b == "go.sum" || b == "package.json" ||
+			b == "Dockerfile" || strings.HasPrefix(b, "Dockerfile.") ||
+			strings.HasPrefix(b, "docker-compose") || strings.HasPrefix(b, "compose.") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasService reports whether the repo builds a runnable service worth deploying
+// and component-testing (vs. a library or a docs-only change).
+func hasService(goDir string, nodeDirs []string) bool {
+	if goDir != "" {
+		if hasFile(goDir, "main.go") {
+			return true
+		}
+		if m, _ := filepath.Glob(filepath.Join(goDir, "cmd", "*", "main.go")); len(m) > 0 {
+			return true
+		}
+	}
+	for _, nd := range nodeDirs {
+		if s, _ := readPackage(nd); s["build"] != "" || s["start"] != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // --- shared ---
 
-func buildFinding(title, output string, role string) factory.Finding {
+func buildFinding(title, output, role string) factory.Finding {
 	return factory.Finding{
 		Source:     "build-gate",
 		Severity:   "high",
@@ -204,9 +376,14 @@ func lookPath(bin string) bool {
 	return err == nil
 }
 
+func hasFile(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
 // goModuleDir returns the directory holding go.mod (root preferred), or "".
 func goModuleDir(dir string) string {
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+	if hasFile(dir, "go.mod") {
 		return dir
 	}
 	found := ""
@@ -267,12 +444,37 @@ func shortRel(base, p string) string {
 	return filepath.Base(p)
 }
 
+// shortID sanitises a run id into a compose-project-safe slug.
+func shortID(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.ToLower(s))
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	if s == "" {
+		return "run"
+	}
+	return s
+}
+
 func tail(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
 	}
 	return "…\n" + s[len(s)-n:]
+}
+
+func clip(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n… (truncated)"
 }
 
 func truncate(s string, n int) string {

@@ -15,6 +15,7 @@ const (
 	RoleBackendDeveloper = "backend-developer"
 	RoleFrontendDev      = "frontend-developer"
 	RoleMobileDeveloper  = "mobile-developer"
+	RoleTestEngineer     = "test-engineer"
 	RoleBuildGate        = "build-gate"
 	RoleSecurityReviewer = "security-reviewer"
 	RoleCodeReviewer     = "code-reviewer"
@@ -209,6 +210,8 @@ func normalizeRole(r string) string {
 		return RoleFrontendDev
 	case "mobile", "mobile-developer", "mobile developer", "ios", "android":
 		return RoleMobileDeveloper
+	case "test", "tests", "qa", "test-engineer", "test engineer", "component-test", "integration":
+		return RoleTestEngineer
 	default:
 		return strings.ToLower(strings.TrimSpace(r))
 	}

@@ -23,6 +23,9 @@ Default stack — use it unless the plan explicitly says otherwise:
 - **Tests:** table-driven unit tests for business logic and handlers.
 - Provide `go.mod` (module path from the plan or `example.com/<name>`), a
   `Makefile` with `gen` / `build` / `test`, and a short `README.md`.
+- **Deployability:** a `GET /healthz` endpoint, and a multi-stage `Dockerfile`
+  (`FROM golang:1.26` builder → slim runtime) that builds and runs the service.
+  It must `docker build` cleanly.
 
 Implement exactly the tasks assigned to you. Keep the change minimal but
 complete: it must compile and `go test ./...` must pass. Commit the generated

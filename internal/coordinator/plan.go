@@ -17,7 +17,8 @@ func isGate(stage string) bool {
 
 // plannedStages is the ordered post-planner pipeline for a run, derived from the
 // planner's task list: an optional ui-ux-designer, the developer roles that have
-// tasks, the build gate, then the two reviewers.
+// tasks, the test-engineer (component tests + deployment glue), the build gate,
+// then the two reviewers.
 func plannedStages(tasks []factory.PlanTask) []string {
 	devs := developerStages(tasks)
 	var stages []string
@@ -25,6 +26,9 @@ func plannedStages(tasks []factory.PlanTask) []string {
 		stages = append(stages, factory.RoleUIUXDesigner)
 	}
 	stages = append(stages, devs...)
+	if len(devs) > 0 {
+		stages = append(stages, factory.RoleTestEngineer)
+	}
 	stages = append(stages, factory.RoleBuildGate)
 	stages = append(stages, factory.RoleSecurityReviewer, factory.RoleCodeReviewer)
 	return stages

@@ -26,3 +26,8 @@ Default stack — use it unless the plan explicitly says otherwise:
 
 Implement exactly the tasks assigned to you. The app must `npm install` and
 `npm run build` cleanly. Put source under `web/` (or the path the plan gives).
+
+**Deployability:** a multi-stage `Dockerfile` (`FROM node:22` build → serve
+`dist/` with a tiny static server or `nginx:alpine`) that `docker build`s
+cleanly. If the plan has the backend serve the SPA instead, say so and skip the
+frontend Dockerfile.

@@ -1,6 +1,7 @@
-# build-gate agent: base image + a real Go 1.26 toolchain + Node 22.
-# It runs `go build`/`go test` and `npm run build` against generated code, so it
-# needs current toolchains — not Debian's apt `golang-go` (~1.21) / `nodejs` (18).
+# build-gate agent: base image + a real Go 1.26 toolchain + Node 22 + the Docker
+# CLI & compose plugin. It runs `go build`/`go test`, `npm run build`,
+# `docker compose config`, and `docker compose up --build` for the component
+# tests against the host daemon (socket mounted in docker-compose.yml).
 FROM golang:1.26-bookworm AS go
 
 FROM ai-software-factory-base:latest
@@ -8,9 +9,13 @@ COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
     GOTOOLCHAIN=local \
     GOFLAGS=-mod=mod
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+RUN install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs docker-ce-cli docker-buildx-plugin docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/* \
- && go version \
- && node --version
+ && go version && node --version && docker --version && docker compose version
 CMD ["/app/bin/agent-build-gate"]

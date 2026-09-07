@@ -121,3 +121,19 @@ func TestParseFindings(t *testing.T) {
 		t.Fatalf("findings = %+v", fs)
 	}
 }
+
+func TestTestEngineerRole(t *testing.T) {
+	for _, in := range []string{"test", "qa", "test-engineer", "Test Engineer", "integration"} {
+		if got := normalizeRole(in); got != RoleTestEngineer {
+			t.Errorf("normalizeRole(%q) = %q, want test-engineer", in, got)
+		}
+	}
+	if IsDeveloperRole(RoleTestEngineer) {
+		t.Fatal("test-engineer must not be a developer role (no routing target, no fix-pass shortcut)")
+	}
+	for _, d := range DeveloperRoles {
+		if d == RoleTestEngineer {
+			t.Fatal("test-engineer leaked into DeveloperRoles")
+		}
+	}
+}

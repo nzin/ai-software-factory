@@ -18,8 +18,8 @@ func main() {
 		DefaultDescription: "Compiles and tests the workspace; fails the run on a broken build.",
 		DefaultSkills:      []string{"build", "test", "ci"},
 		DefaultPort:        9108,
-		Executor: func(*agentkit.Bootstrapped) a2asrv.AgentExecutor {
-			return buildgate.Executor()
+		Executor: func(b *agentkit.Bootstrapped) a2asrv.AgentExecutor {
+			return buildgate.Executor(b.LLM, b.SystemPrompt)
 		},
 	})
 }

@@ -34,6 +34,8 @@ Return ONLY a JSON array of files to write, no prose:
 Rules:
 - Full file contents, not diffs. Paths are relative to the repo root.
 - Include everything needed to build and run: source, config, go.mod / package.json, tests.
+- If you create a runnable service, include a multi-stage Dockerfile for it that
+  builds and runs cleanly, and a /healthz (or equivalent) endpoint.
 - Do not delete files. Overwrite by providing the same path.
 - Keep it minimal but complete for the assigned tasks.
 - Answer with the JSON array and nothing else. If (and only if) there is genuinely
@@ -55,12 +57,12 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			return factory.ResultEnvelope{}, err
 		}
 		if len(files) == 0 {
-			// On a fix pass "nothing to change" is a legitimate answer — the
-			// reviewer's findings may already be addressed, or judged noise. Let
-			// the run advance to the reviewers instead of failing it. On the
-			// first pass the agent was asked to build something, so producing
-			// nothing is a real failure.
-			if env.Attempt > 0 {
+			// "Nothing to do" is legitimate for a fix pass (findings already
+			// addressed or judged noise) and for the test-engineer against a
+			// library / docs-only change (there is no runnable service to test).
+			// A developer's first pass, though, was asked to build something —
+			// producing nothing there is a real failure.
+			if env.Attempt > 0 || !factory.IsDeveloperRole(env.Stage) {
 				return factory.ResultEnvelope{
 					Role:    env.Stage,
 					Summary: "no changes needed: " + head(out, 300),
@@ -111,6 +113,9 @@ func buildPrompt(env factory.DispatchEnvelope, dir string, tree []string) string
 		b.WriteString("\n")
 	}
 	b.WriteString("# Your tasks\n\n")
+	if len(env.Tasks) == 0 {
+		b.WriteString("(no explicit task list — derive your work from the PRD, the plan, and the current repository as your role prompt describes)\n")
+	}
 	for _, t := range env.Tasks {
 		fmt.Fprintf(&b, "- [%s] %s\n", t.ID, t.Title)
 		if t.Details != "" {

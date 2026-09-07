@@ -7,12 +7,15 @@
 #                      at awaiting_approval; this script auto-approves it
 #   ui-ux-designer <- UI spec (when there are frontend/mobile tasks)
 #   backend/frontend/mobile developers <- write files into a per-run git workspace
+#   test-engineer  <- component test suite + docker-compose deployment glue
+#   build-gate     <- go build/test, npm build, `docker compose up` component tests
 #   security-reviewer <- gosec/govulncheck/npm-audit + an LLM pass
 #   code-reviewer     <- Kodus (informational finding if KODUS_TEAM_KEY unset)
-#   reviewers can bounce the work back to a developer (request_changes) until
-#   they approve or the per-stage attempt cap trips.
+#   reviewers and the build gate bounce the work back to a developer until they
+#   pass or the per-role attempt cap trips.
 #
-# Requires ANTHROPIC_API_KEY. Kodus is optional (see scripts/kodus-setup.md).
+# Requires ANTHROPIC_API_KEY and a working Docker (the build gate runs
+# `docker compose up` for the component tests). Kodus is optional.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -50,8 +53,9 @@ start mobile-developer       9105 agent-mobile-developer
 start security-reviewer      9106 agent-security-reviewer
 start code-reviewer          9107 agent-code-reviewer
 start build-gate             9108 agent-build-gate
+start test-engineer          9109 agent-test-engineer
 
-for p in 9101 9102 9103 9104 9105 9106 9107 9108; do
+for p in 9101 9102 9103 9104 9105 9106 9107 9108 9109; do
   for _ in $(seq 1 50); do
     curl -sf "127.0.0.1:$p/.well-known/agent-card.json" >/dev/null && break
     sleep 0.2

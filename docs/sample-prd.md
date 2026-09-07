@@ -65,4 +65,6 @@ deployable). Game state lives server-side so the rules are enforced in one place
 - Accounts, authentication, persistence across restarts.
 - Multiplayer / real-time play between two humans.
 - An unbeatable (full minimax) AI - a simple heuristic is enough.
-- Deployment/CI configuration beyond the single binary.
+- CI/CD pipelines, cloud infra, k8s manifests. (A `Dockerfile` running the single
+  binary and a root `docker-compose.yml` are still expected — the factory always
+  makes the repo runnable with `docker compose up`.)
