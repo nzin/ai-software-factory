@@ -12,6 +12,7 @@ import (
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/runs"
+	"github.com/nzin/ai-software-factory/internal/coordinator/ui"
 )
 
 //go:generate swagger generate server --target ../../gen --name Coordinator --spec ../../../../api/coordinator.swagger.yml --principal any --exclude-main
@@ -85,6 +86,10 @@ func setupMiddlewares(handler http.Handler) http.Handler {
 
 // The middleware configuration happens before anything, this middleware also applies to serving the swagger.json document.
 // So this is a good place to plug in a panic handling middleware, logging and metrics.
+//
+// We use it to serve the built Vue SPA (browser/asf-ui/dist) from the same
+// origin as the API. See internal/coordinator/ui; the directory is chosen by
+// `coordinator serve --ui-dir` and is a no-op when the SPA has not been built.
 func setupGlobalMiddleware(handler http.Handler) http.Handler {
-	return handler
+	return ui.Middleware(handler)
 }

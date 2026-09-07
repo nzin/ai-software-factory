@@ -1,0 +1,28 @@
+# The Dockerfile does `COPY . .`, so keep the build context small and free of
+# host-built artifacts. The Vue SPA is built inside the image (see the `ui`
+# stage), so a host dist/ and node_modules must never be copied in.
+.git
+.gitignore
+bin/
+workspace/
+.kodus/
+
+browser/*/node_modules/
+browser/*/dist/
+node_modules/
+
+# local secrets / scratch — never bake these into an image
+.env
+anthropic_api_key
+*_api_key
+
+*.db
+*.db-shm
+*.db-wal
+coverage.txt
+
+# docs and plans are not needed at build time
+docs/
+plan.md
+plan_next.md
+full_plan.md

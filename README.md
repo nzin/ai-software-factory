@@ -6,15 +6,16 @@ agents collaborates to produce a feature as a **Pull Request** for human review.
 Agents talk to each other over the [A2A protocol](https://a2a-protocol.org/)
 using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
 
-> **Status: Phase 3.** The full agent roster (planner, UI/UX designer, backend /
+> **Status: Phase 4.** The full agent roster (planner, UI/UX designer, backend /
 > frontend / mobile developers, security reviewer, code reviewer); the
 > coordinator loop with a **feedback loop** (reviewers route `request_changes`
 > back to a developer until they approve or a per-stage cap trips), a **human
 > approval gate** after planning for non-trivial code changes, **real git
-> repositories** (new / local worktree / remote clone + push + GitHub PR), and
-> **durable async runs** (`POST /v1/prd` returns immediately; SQLite run store
-> survives a restart). The web UI is still ahead — see
-> [`plan_next.md`](plan_next.md).
+> repositories** (new / local worktree / remote clone + push + GitHub PR),
+> **durable async runs** with a full per-run event log, and a **web UI** at
+> `http://localhost:8090` — a runs kanban, a per-run timeline, the A2A catalog,
+> and accept / request-changes review controls. Next up: build+test gates and
+> GitHub PR-comment ingestion — see [`plan_next.md`](plan_next.md).
 
 ## Architecture
 
@@ -51,6 +52,35 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
   Developers write files into the worktree; `security-reviewer` runs SAST
   (gosec / govulncheck / `npm audit`) plus an LLM pass; `code-reviewer` shells
   out to the [Kodus](https://kodus.io/) CLI.
+- **web UI** — a Vue 3 SPA (`browser/asf-ui`) served by the coordinator at `/`,
+  same-origin with its API. See [Web UI](#web-ui).
+
+### Web UI
+
+`browser/asf-ui` is a Vue 3 SPA (Vite + vue-router + axios + Element Plus). The
+coordinator serves the built bundle at `/` and its REST API under `/v1`, so the
+browser is same-origin with both and no CORS is involved — the coordinator also
+reads the catalog through for the UI (`GET /v1/agents`).
+
+| Route | What |
+|---|---|
+| `/` | **Runs kanban** — every run bucketed into *In progress · Awaiting approval · Needs attention · Ready for review · Closed*, polled every 4s |
+| `/runs/:id` | **Run detail** — a **Timeline** of every event, **Steps** with each agent's summary / files written / commit / verdict / findings, the **Plan**, all **Findings**, and the raw JSON. Action bar switches on status: approve/reject at the gate, resume/abandon when parked, accept/request-changes when a branch is ready |
+| `/submit` | **Submit a PRD** — markdown + target repo + budget overrides |
+| `/agents` | **A2A catalog** — the roster with each agent's model, effort and skills |
+| `/agents/:role` | **Agent detail** — registration, model config, and the assembled `AgentCard` with its `modelext` extension |
+
+```bash
+make build_ui                      # -> browser/asf-ui/dist (needs Node >= 20)
+./bin/coordinator serve --ui-dir browser/asf-ui/dist
+# then open http://localhost:8090
+```
+
+`make build` stays Go-only on purpose: when `--ui-dir` (env `ASF_UI_DIR`) has no
+`index.html` the coordinator just serves the API, so nothing about the headless
+factory needs a Node toolchain. `make run_ui` starts the Vite dev server on
+`:5173` and proxies `/v1` to a coordinator on `:8090`. In Docker the SPA is built
+in its own image stage, so `make up` serves the UI with no host Node at all.
 
 ### Agent prompts
 
@@ -102,10 +132,13 @@ comes back the next time that agent restarts.
 ## Build & test
 
 ```bash
-make build      # -> ./bin/{catalog, coordinator, agent-*}
-make test
+make build      # -> ./bin/{catalog, coordinator, agent-*}   (Go only)
+make build_ui   # -> browser/asf-ui/dist                     (needs Node >= 20)
+make test       # go test ./...
+make test_ui    # vitest
 make vet
 make gen        # regenerate go-swagger code from api/*.swagger.yml
+make all        # gen + build_ui + build + test
 ```
 
 ## Run it
@@ -114,6 +147,7 @@ make gen        # regenerate go-swagger code from api/*.swagger.yml
 
 ```bash
 make up                 # build images + start catalog, coordinator, all 7 agents
+                        # -> web UI at http://localhost:8090
 make kodus-up           # optional: self-hosted Kodus (then scripts/kodus-setup.md)
 
 # submit a PRD (repoURL: "" scaffolds a brand-new local repo in the workspace)
@@ -179,7 +213,8 @@ curl -s -X PATCH localhost:8080/v1/agents/backend-developer/model \
 | `internal/kodus/` | Kodus CLI wrapper |
 | `internal/sast/` | gosec / govulncheck / npm-audit wrappers |
 | `internal/agents/{devagent,uiux,secreview,codereview}/` | per-role executors |
-| `internal/coordinator/` | the `Run` state machine + drive loop (`coordinator.go`), stage sequencing (`plan.go`), A2A pipeline engine (`pipeline.go`), run store (`store.go`, `runstore/`) |
+| `internal/coordinator/` | the `Run` state machine + drive loop and event log (`coordinator.go`, `run.go`), stage sequencing (`plan.go`), A2A pipeline engine (`pipeline.go`), run store (`store.go`, `runstore/`), SPA serving (`ui/`) |
+| `browser/asf-ui/` | the Vue 3 SPA served by the coordinator |
 | `internal/prd/` | PRD type + Markdown/JSON parsing |
 | `cmd/agent-*` | the seven agent binaries |
 | `Dockerfile*`, `docker-compose.yml` | the containerised factory |

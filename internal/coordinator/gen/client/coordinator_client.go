@@ -8,6 +8,7 @@ import (
 	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/agents"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/client/runs"
 )
@@ -55,6 +56,7 @@ func New(transport runtime.ContextualTransport, formats strfmt.Registry) *Coordi
 
 	cli := new(Coordinator)
 	cli.Transport = transport
+	cli.Agents = agents.New(transport, formats)
 	cli.Health = health.New(transport, formats)
 	cli.Runs = runs.New(transport, formats)
 
@@ -116,6 +118,8 @@ func (cfg *TransportConfig) WithConsumers(consumers map[string]runtime.Consumer)
 
 // Coordinator is a client for coordinator.
 type Coordinator struct {
+	Agents agents.ClientService
+
 	Health health.ClientService
 
 	Runs runs.ClientService
@@ -126,6 +130,7 @@ type Coordinator struct {
 // SetTransport changes the transport on the client and all its subresources.
 func (c *Coordinator) SetTransport(transport runtime.ContextualTransport) {
 	c.Transport = transport
+	c.Agents.SetTransport(transport)
 	c.Health.SetTransport(transport)
 	c.Runs.SetTransport(transport)
 }

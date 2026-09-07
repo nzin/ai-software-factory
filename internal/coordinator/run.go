@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nzin/ai-software-factory/internal/factory"
@@ -62,7 +63,109 @@ type Task struct {
 	Summary   string `json:"summary,omitempty"`
 	CommitSHA string `json:"commitSha,omitempty"`
 	Output    string `json:"output,omitempty"`
+
+	// Per-step detail, for the run-detail UI.
+	Attempt      int       `json:"attempt,omitempty"`
+	StartedAt    time.Time `json:"startedAt,omitempty"`
+	DurationMs   int64     `json:"durationMs,omitempty"`
+	Verdict      string    `json:"verdict,omitempty"`
+	FilesWritten []string  `json:"filesWritten,omitempty"`
+	// Findings this step produced. Run.Findings stays the routing accumulator;
+	// this is the per-step audit record.
+	Findings []Finding `json:"findings,omitempty"`
 }
+
+// Event kinds. Every transition a run goes through gets one.
+const (
+	EventSubmitted        = "submitted"
+	EventStageStarted     = "stage_started"
+	EventStageCompleted   = "stage_completed"
+	EventStageFailed      = "stage_failed"
+	EventPlanReady        = "plan_ready"
+	EventAwaitingApproval = "awaiting_approval"
+	EventApproved         = "approved"
+	EventRejected         = "rejected"
+	EventRequestChanges   = "request_changes"
+	EventAttemptCap       = "attempt_cap"
+	EventBudgetExhausted  = "budget_exhausted"
+	EventPushed           = "pushed"
+	EventPROpened         = "pr_opened"
+	EventReviewAccepted   = "review_accepted"
+	EventReviewChanges    = "review_changes_requested"
+	EventResumed          = "resumed"
+	EventRecovered        = "recovered"
+	EventFinished         = "finished"
+	EventTruncated        = "truncated"
+)
+
+// Actors behind an event.
+const (
+	ActorSystem = "system"
+	ActorHuman  = "human"
+)
+
+// Limits on the event log: the whole Run is marshalled into one store row.
+const (
+	maxEventDetail = 8 << 10 // 8 KiB
+	maxEvents      = 500
+)
+
+// Event is one entry in a run's durable audit log.
+type Event struct {
+	Seq        int       `json:"seq"`
+	At         time.Time `json:"at"`
+	Kind       string    `json:"kind"`
+	Stage      string    `json:"stage,omitempty"`
+	Status     string    `json:"status,omitempty"` // run status after this event
+	Message    string    `json:"message"`
+	Detail     string    `json:"detail,omitempty"`
+	Attempt    int       `json:"attempt,omitempty"`
+	DurationMs int64     `json:"durationMs,omitempty"`
+	Actor      string    `json:"actor,omitempty"`
+}
+
+// addEvent appends an event and returns a pointer to it so the caller can fill
+// in the optional fields (Detail, DurationMs, ...). It stamps Seq and At, and
+// keeps the log bounded.
+func (r *Run) addEvent(kind, stage, message string) *Event {
+	seq := 1
+	if n := len(r.Events); n > 0 {
+		seq = r.Events[n-1].Seq + 1
+	}
+	r.Events = append(r.Events, Event{
+		Seq:     seq,
+		At:      time.Now().UTC(),
+		Kind:    kind,
+		Stage:   stage,
+		Status:  string(r.Status),
+		Message: message,
+		Actor:   ActorSystem,
+	})
+	if len(r.Events) > maxEvents {
+		// Drop the oldest half and leave a marker so the gap is visible.
+		drop := len(r.Events) - maxEvents
+		r.Events = append([]Event{{
+			Seq:     r.Events[0].Seq,
+			At:      r.Events[0].At,
+			Kind:    EventTruncated,
+			Message: fmt.Sprintf("%d earlier events dropped (log capped at %d)", drop, maxEvents),
+			Actor:   ActorSystem,
+		}}, r.Events[drop+1:]...)
+	}
+	return &r.Events[len(r.Events)-1]
+}
+
+// WithDetail attaches a (truncated) detail body to an event.
+func (e *Event) WithDetail(s string) *Event {
+	if len(s) > maxEventDetail {
+		s = s[:maxEventDetail] + "\n… (truncated)"
+	}
+	e.Detail = s
+	return e
+}
+
+// By marks who triggered the event.
+func (e *Event) By(actor string) *Event { e.Actor = actor; return e }
 
 // Run is one PRD flowing through the factory.
 type Run struct {
@@ -71,6 +174,7 @@ type Run struct {
 	PRD       prd.PRD `json:"prd"`
 	Status    Status  `json:"status"`
 	Stage     string  `json:"stage"`
+	LastStage string  `json:"lastStage,omitempty"` // stage the run stopped in; where resume restarts
 	Reason    string  `json:"reason,omitempty"`
 	Budget    Budget  `json:"budget"`
 
@@ -91,6 +195,7 @@ type Run struct {
 	// Loop state.
 	Findings []Finding      `json:"findings,omitempty"`
 	Tasks    []Task         `json:"tasks,omitempty"`
+	Events   []Event        `json:"events,omitempty"`
 	Attempts map[string]int `json:"attempts,omitempty"`
 	PausedAt time.Time      `json:"pausedAt,omitempty"`
 

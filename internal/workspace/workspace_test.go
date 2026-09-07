@@ -161,6 +161,70 @@ func TestPrepareLocalRepoUsesWorktree(t *testing.T) {
 	}
 }
 
+// A developer agent writes its own .gitignore, and a rule meant for a build
+// artifact can match a source directory of the same name. The files the agent
+// explicitly wrote must still be committed.
+func TestAddPathsBeatsAModelAuthoredGitignore(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	m := NewManager(t.TempDir())
+	repo, err := m.Prepare(ctx, "ign-1", newRef(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	written, err := repo.WriteFiles(map[string]string{
+		// "/notes" is meant to ignore the compiled binary, but it also matches
+		// the notes/ package the agent is writing right now.
+		".gitignore":          "/notes\n*.test\n",
+		"main.go":             "package main\n",
+		"notes/store.go":      "package notes\n",
+		"notes/store_test.go": "package notes\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(written) != 4 {
+		t.Fatalf("written = %v", written)
+	}
+	if err := repo.AddPaths(ctx, written); err != nil {
+		t.Fatalf("add paths: %v", err)
+	}
+	if _, err := repo.Commit(ctx, "backend-developer", "add notes package"); err != nil {
+		t.Fatal(err)
+	}
+
+	tracked, err := repo.Tree(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, f := range tracked {
+		got[f] = true
+	}
+	for _, want := range []string{".gitignore", "main.go", "notes/store.go", "notes/store_test.go"} {
+		if !got[want] {
+			t.Fatalf("%s was not committed; tracked = %v", want, tracked)
+		}
+	}
+
+	// The .gitignore still governs files nobody asked us to write.
+	if _, err := repo.WriteFiles(map[string]string{"notes/junk.test": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Commit(ctx, "backend-developer", "noop"); err != nil {
+		t.Fatal(err)
+	}
+	tracked, _ = repo.Tree(ctx)
+	for _, f := range tracked {
+		if f == "notes/junk.test" {
+			t.Fatal("an ignored build artifact was committed")
+		}
+	}
+}
+
 func TestPrune(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

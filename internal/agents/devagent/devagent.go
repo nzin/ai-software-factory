@@ -7,6 +7,7 @@ package devagent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,7 +35,9 @@ Rules:
 - Full file contents, not diffs. Paths are relative to the repo root.
 - Include everything needed to build and run: source, config, go.mod / package.json, tests.
 - Do not delete files. Overwrite by providing the same path.
-- Keep it minimal but complete for the assigned tasks.`
+- Keep it minimal but complete for the assigned tasks.
+- Answer with the JSON array and nothing else. If (and only if) there is genuinely
+  nothing to change, answer with exactly [] — never with prose.`
 
 // Executor builds the developer executor for a given role prompt.
 func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
@@ -47,19 +50,32 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 		tree, _ := repo.Tree(ctx)
 		user := buildPrompt(env, repo.Dir, tree)
 
-		out, err := client.Complete(ctx, systemPrompt, user)
+		files, out, err := completeFiles(ctx, client, systemPrompt, user, env.Stage)
 		if err != nil {
 			return factory.ResultEnvelope{}, err
 		}
-		files, err := factory.ParseFileSpecs(out)
-		if err != nil {
-			return factory.ResultEnvelope{}, fmt.Errorf("devagent(%s): could not parse file list from model: %w", env.Stage, err)
-		}
 		if len(files) == 0 {
-			return factory.ResultEnvelope{}, fmt.Errorf("devagent(%s): model returned no files", env.Stage)
+			// On a fix pass "nothing to change" is a legitimate answer — the
+			// reviewer's findings may already be addressed, or judged noise. Let
+			// the run advance to the reviewers instead of failing it. On the
+			// first pass the agent was asked to build something, so producing
+			// nothing is a real failure.
+			if env.Attempt > 0 {
+				return factory.ResultEnvelope{
+					Role:    env.Stage,
+					Summary: "no changes needed: " + head(out, 300),
+				}, nil
+			}
+			return factory.ResultEnvelope{}, fmt.Errorf(
+				"devagent(%s): model returned no files (said %q)", env.Stage, head(out, 200))
 		}
 		written, err := repo.WriteFiles(files)
 		if err != nil {
+			return factory.ResultEnvelope{}, err
+		}
+		// Force-stage what we just wrote: a .gitignore the model authored in this
+		// same pass must not be able to silently drop our own source files.
+		if err := repo.AddPaths(ctx, written); err != nil {
 			return factory.ResultEnvelope{}, err
 		}
 		sha, err := repo.Commit(ctx, env.Stage, taskTitles(env.Tasks))
@@ -133,6 +149,55 @@ func existingContent(dir string, tree []string) string {
 		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", rel, data)
 	}
 	return b.String()
+}
+
+// retryContract nudges a model that answered in prose back to the wire format.
+const retryContract = `
+Your previous answer was not a JSON array and could not be used.
+
+Reply with ONLY the JSON array described above — no prose, no explanation, no
+markdown outside the fenced block. If nothing needs to change, reply with
+exactly: []`
+
+// completeFiles asks the model for the file list, retrying once when the reply
+// is not parseable. The models occasionally answer a fix-pass prompt in prose
+// ("the findings are already addressed") instead of the agreed JSON; one strict
+// retry is much cheaper than failing the whole run.
+func completeFiles(ctx context.Context, client *llm.Client, system, user, stage string) (map[string]string, string, error) {
+	out, err := client.Complete(ctx, system, user)
+	if err != nil {
+		return nil, "", err
+	}
+	files, parseErr := factory.ParseFileSpecs(out)
+	if parseErr == nil {
+		return files, out, nil
+	}
+	log.Printf("devagent(%s): unparseable reply (%d bytes, starts %q) — retrying once",
+		stage, len(out), head(out, 120))
+
+	retry, err := client.Complete(ctx, system, user+"\n\n"+retryContract)
+	if err != nil {
+		return nil, "", err
+	}
+	files, retryErr := factory.ParseFileSpecs(retry)
+	if retryErr == nil {
+		return files, retry, nil
+	}
+	if dbg := os.Getenv("ASF_DEBUG_DIR"); dbg != "" {
+		_ = os.WriteFile(filepath.Join(dbg, "devagent-"+stage+"-raw.txt"),
+			[]byte(out+"\n\n===== RETRY =====\n\n"+retry), 0o644)
+	}
+	return nil, retry, fmt.Errorf(
+		"devagent(%s): could not parse file list after a retry (%d bytes, starts %q): %w",
+		stage, len(retry), head(retry, 200), retryErr)
+}
+
+func head(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func taskTitles(tasks []factory.PlanTask) string {

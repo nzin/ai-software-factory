@@ -3,7 +3,7 @@
 // Usage:
 //
 //	coordinator submit --prd path/to/prd.md [--repo URL] [--out plan.md]
-//	coordinator serve  --addr :8090 [--runstore /data/runs.db]
+//	coordinator serve  --addr :8090 [--runstore /data/runs.db] [--ui-dir DIR]
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations"
 	"github.com/nzin/ai-software-factory/internal/coordinator/runstore"
+	"github.com/nzin/ai-software-factory/internal/coordinator/ui"
 	"github.com/nzin/ai-software-factory/internal/prd"
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
@@ -160,10 +161,15 @@ func cmdServe(args []string) {
 	baseBranch := fs.String("base-branch", envOr("ASF_BASE_BRANCH", "main"), "default branch to base work on")
 	budget := fs.Int("iteration-budget", coordinator.DefaultIterationBudget, "default per-run iteration budget")
 	deadline := fs.Duration("deadline", coordinator.DefaultDeadline, "default per-run wall-clock budget")
+	uiDir := fs.String("ui-dir", envOr("ASF_UI_DIR", "browser/asf-ui/dist"),
+		"built Vue SPA to serve at / (skipped when it has no index.html)")
 	_ = fs.Parse(args)
 
 	orch := newOrchestrator(*catalogURL, *wsRoot, *store, *baseBranch,
 		coordinator.WithDefaults(*budget, *deadline))
+
+	// Must happen before ConfigureAPI, which builds the middleware stack.
+	ui.SetDir(*uiDir)
 
 	swaggerSpec, err := loads.Analyzed(restapi.SwaggerJSON, "")
 	if err != nil {

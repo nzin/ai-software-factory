@@ -15,6 +15,7 @@ import (
 	"github.com/go-openapi/spec"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag/cmdutils"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/agents"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/health"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations/runs"
 )
@@ -47,6 +48,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			return middleware.NotImplemented("operation runs.ApproveRun has not yet been implemented")
 		}),
 
+		AgentsGetAgentDetailHandler: agents.GetAgentDetailHandlerFunc(func(params agents.GetAgentDetailParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation agents.GetAgentDetail has not yet been implemented")
+		}),
+
 		RunsGetRunHandler: runs.GetRunHandlerFunc(func(params runs.GetRunParams) middleware.Responder {
 			_ = params
 
@@ -59,6 +66,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			return middleware.NotImplemented("operation health.Health has not yet been implemented")
 		}),
 
+		AgentsListAgentsHandler: agents.ListAgentsHandlerFunc(func(params agents.ListAgentsParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation agents.ListAgents has not yet been implemented")
+		}),
+
 		RunsListRunsHandler: runs.ListRunsHandlerFunc(func(params runs.ListRunsParams) middleware.Responder {
 			_ = params
 
@@ -69,6 +82,18 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation runs.RejectRun has not yet been implemented")
+		}),
+
+		RunsResumeRunHandler: runs.ResumeRunHandlerFunc(func(params runs.ResumeRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.ResumeRun has not yet been implemented")
+		}),
+
+		RunsReviewRunHandler: runs.ReviewRunHandlerFunc(func(params runs.ReviewRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.ReviewRun has not yet been implemented")
 		}),
 
 		RunsSubmitPRDHandler: runs.SubmitPRDHandlerFunc(func(params runs.SubmitPRDParams) middleware.Responder {
@@ -114,14 +139,22 @@ type CoordinatorAPI struct {
 
 	// RunsApproveRunHandler sets the operation handler for the approve run operation
 	RunsApproveRunHandler runs.ApproveRunHandler
+	// AgentsGetAgentDetailHandler sets the operation handler for the get agent detail operation
+	AgentsGetAgentDetailHandler agents.GetAgentDetailHandler
 	// RunsGetRunHandler sets the operation handler for the get run operation
 	RunsGetRunHandler runs.GetRunHandler
 	// HealthHealthHandler sets the operation handler for the health operation
 	HealthHealthHandler health.HealthHandler
+	// AgentsListAgentsHandler sets the operation handler for the list agents operation
+	AgentsListAgentsHandler agents.ListAgentsHandler
 	// RunsListRunsHandler sets the operation handler for the list runs operation
 	RunsListRunsHandler runs.ListRunsHandler
 	// RunsRejectRunHandler sets the operation handler for the reject run operation
 	RunsRejectRunHandler runs.RejectRunHandler
+	// RunsResumeRunHandler sets the operation handler for the resume run operation
+	RunsResumeRunHandler runs.ResumeRunHandler
+	// RunsReviewRunHandler sets the operation handler for the review run operation
+	RunsReviewRunHandler runs.ReviewRunHandler
 	// RunsSubmitPRDHandler sets the operation handler for the submit p r d operation
 	RunsSubmitPRDHandler runs.SubmitPRDHandler
 
@@ -204,17 +237,29 @@ func (o *CoordinatorAPI) Validate() error {
 	if o.RunsApproveRunHandler == nil {
 		unregistered = append(unregistered, "runs.ApproveRunHandler")
 	}
+	if o.AgentsGetAgentDetailHandler == nil {
+		unregistered = append(unregistered, "agents.GetAgentDetailHandler")
+	}
 	if o.RunsGetRunHandler == nil {
 		unregistered = append(unregistered, "runs.GetRunHandler")
 	}
 	if o.HealthHealthHandler == nil {
 		unregistered = append(unregistered, "health.HealthHandler")
 	}
+	if o.AgentsListAgentsHandler == nil {
+		unregistered = append(unregistered, "agents.ListAgentsHandler")
+	}
 	if o.RunsListRunsHandler == nil {
 		unregistered = append(unregistered, "runs.ListRunsHandler")
 	}
 	if o.RunsRejectRunHandler == nil {
 		unregistered = append(unregistered, "runs.RejectRunHandler")
+	}
+	if o.RunsResumeRunHandler == nil {
+		unregistered = append(unregistered, "runs.ResumeRunHandler")
+	}
+	if o.RunsReviewRunHandler == nil {
+		unregistered = append(unregistered, "runs.ReviewRunHandler")
 	}
 	if o.RunsSubmitPRDHandler == nil {
 		unregistered = append(unregistered, "runs.SubmitPRDHandler")
@@ -316,6 +361,10 @@ func (o *CoordinatorAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/v1/agents/{role}"] = agents.NewGetAgentDetail(o.context, o.AgentsGetAgentDetailHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/v1/runs/{id}"] = runs.NewGetRun(o.context, o.RunsGetRunHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
@@ -324,11 +373,23 @@ func (o *CoordinatorAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/v1/agents"] = agents.NewListAgents(o.context, o.AgentsListAgentsHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/v1/runs"] = runs.NewListRuns(o.context, o.RunsListRunsHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
 	o.handlers["POST"]["/v1/runs/{id}/reject"] = runs.NewRejectRun(o.context, o.RunsRejectRunHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/v1/runs/{id}/resume"] = runs.NewResumeRun(o.context, o.RunsResumeRunHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/v1/runs/{id}/review"] = runs.NewReviewRun(o.context, o.RunsReviewRunHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

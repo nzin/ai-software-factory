@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,11 +46,19 @@ type Engine interface {
 	Run(ctx context.Context, run *Run) (StageResult, error)
 }
 
+// CatalogReader is the slice of the catalog the UI needs. The coordinator acts
+// as a BFF for the browser, which is same-origin with it but not the catalog.
+type CatalogReader interface {
+	ListAgents(ctx context.Context) ([]agentkit.AgentInfo, error)
+	GetAgentDetail(ctx context.Context, role string) (*agentkit.AgentDetail, error)
+}
+
 // Orchestrator drives runs and owns their persistence.
 type Orchestrator struct {
 	engine    Engine
 	workspace *workspace.Manager
 	store     Store
+	catalog   CatalogReader
 
 	iterationBudget int
 	deadline        time.Duration
@@ -67,6 +76,7 @@ type Option func(*Orchestrator)
 func WithEngine(e Engine) Option                { return func(o *Orchestrator) { o.engine = e } }
 func WithWorkspace(m *workspace.Manager) Option { return func(o *Orchestrator) { o.workspace = m } }
 func WithStore(s Store) Option                  { return func(o *Orchestrator) { o.store = s } }
+func WithCatalog(c CatalogReader) Option        { return func(o *Orchestrator) { o.catalog = c } }
 func WithMaxStageIterations(n int) Option       { return func(o *Orchestrator) { o.maxStageIter = n } }
 func WithBaseBranch(b string) Option            { return func(o *Orchestrator) { o.baseBranch = b } }
 
@@ -84,6 +94,7 @@ func New(catalog *agentkit.CatalogClient, opts ...Option) *Orchestrator {
 		engine:          &pipelineEngine{catalog: catalog},
 		workspace:       workspace.NewManager("workspace"),
 		store:           NewMemStore(),
+		catalog:         catalogOrNil(catalog),
 		iterationBudget: DefaultIterationBudget,
 		deadline:        DefaultDeadline,
 		maxStageIter:    DefaultMaxStageIterations,
@@ -97,6 +108,26 @@ func New(catalog *agentkit.CatalogClient, opts ...Option) *Orchestrator {
 	return o
 }
 
+// catalogOrNil avoids stuffing a typed nil pointer into the interface, which
+// would make `o.catalog != nil` true for a nil client.
+func catalogOrNil(c *agentkit.CatalogClient) CatalogReader {
+	if c == nil {
+		return nil
+	}
+	return c
+}
+
+// Catalog returns the catalog reader, or nil when none is configured.
+func (o *Orchestrator) Catalog() CatalogReader { return o.catalog }
+
+// event appends an entry to the run's durable log and mirrors it to stdout, so
+// the two can never drift. The returned pointer takes optional detail.
+func (o *Orchestrator) event(run *Run, kind, stage, format string, a ...any) *Event {
+	msg := fmt.Sprintf(format, a...)
+	log.Printf("run %s: %s", run.ID, msg)
+	return run.addEvent(kind, stage, msg)
+}
+
 // Recover reconciles persisted runs on startup: a run left mid-flight (running)
 // is parked for a human; awaiting_approval runs stay resumable.
 func (o *Orchestrator) Recover() error {
@@ -106,11 +137,12 @@ func (o *Orchestrator) Recover() error {
 	}
 	for _, r := range runs {
 		if r.Status == StatusRunning {
+			r.LastStage = r.Stage
 			r.Status = StatusNeedsHumanReview
 			r.Reason = "coordinator restarted mid-run"
 			r.UpdatedAt = time.Now().UTC()
+			o.event(r, EventRecovered, r.LastStage, "parked (coordinator restarted mid-%s)", r.LastStage)
 			_ = o.store.Put(r)
-			log.Printf("run %s: parked (coordinator restarted mid-%s)", r.ID, r.Stage)
 		}
 	}
 	return nil
@@ -174,6 +206,12 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 		run.RepoKind = string(repo.Kind)
 	}
 
+	o.event(run, EventSubmitted, run.Stage,
+		"submitted %q (repo kind=%s, branch=%s, budget=%d)",
+		p.Title, orDash(run.RepoKind), orDash(run.WorkBranch), iters).
+		By(ActorHuman).
+		WithDetail(p.Text())
+
 	if err := o.store.Put(run); err != nil {
 		return nil, err
 	}
@@ -209,6 +247,8 @@ func (o *Orchestrator) Approve(id string) (*Run, error) {
 	run.Status = StatusRunning
 	run.Stage = firstDevelopmentStage(run)
 	run.UpdatedAt = time.Now().UTC()
+	o.event(run, EventApproved, run.Stage, "plan approved by a human — resuming at %s", orDash(run.Stage)).
+		By(ActorHuman)
 	_ = o.store.Put(run)
 	o.start(run)
 	if r, ok, _ := o.store.Get(run.ID); ok {
@@ -227,6 +267,8 @@ func (o *Orchestrator) Reject(id, feedback string, abandon bool) (*Run, error) {
 		return run, fmt.Errorf("coordinator: run %s is %s, not awaiting_approval", id, run.Status)
 	}
 	if abandon {
+		o.event(run, EventRejected, run.LastStage, "plan rejected and abandoned by a human").
+			By(ActorHuman).WithDetail(feedback)
 		o.stop(run, StatusFailed, "abandoned by human at the approval gate")
 		if r, ok, _ := o.store.Get(run.ID); ok {
 			return r, nil
@@ -241,12 +283,194 @@ func (o *Orchestrator) Reject(id, feedback string, abandon bool) (*Run, error) {
 	run.Stage = planner.Role
 	run.Plan, run.PlanTasks, run.Approval = "", nil, nil
 	run.UpdatedAt = time.Now().UTC()
+	o.event(run, EventRejected, run.Stage, "plan rejected by a human — replanning").
+		By(ActorHuman).WithDetail(feedback)
 	_ = o.store.Put(run)
 	o.start(run)
 	if r, ok, _ := o.store.Get(run.ID); ok {
 		return r, nil
 	}
 	return run, nil
+}
+
+// ResumeOptions are the knobs on un-sticking a needs_human_review run.
+type ResumeOptions struct {
+	IterationBudget int           // extra iterations to grant (0 = a default top-up)
+	Deadline        time.Duration // extra wall-clock to grant (0 = a default top-up)
+	Abandon         bool
+}
+
+// Resume restarts a run parked in needs_human_review, granting fresh budget.
+func (o *Orchestrator) Resume(id string, opts ResumeOptions) (*Run, error) {
+	run, ok, _ := o.store.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("coordinator: no run %s", id)
+	}
+	if run.Status != StatusNeedsHumanReview {
+		return run, fmt.Errorf("coordinator: run %s is %s, not needs_human_review", id, run.Status)
+	}
+	if opts.Abandon {
+		o.event(run, EventRejected, run.LastStage, "abandoned by a human").By(ActorHuman)
+		o.stop(run, StatusFailed, "abandoned by human")
+		if r, ok, _ := o.store.Get(run.ID); ok {
+			return r, nil
+		}
+		return run, nil
+	}
+
+	grant := opts.IterationBudget
+	if grant <= 0 {
+		grant = o.iterationBudget
+	}
+	run.Budget.IterationsRemaining += grant
+
+	extend := opts.Deadline
+	if extend <= 0 {
+		extend = o.deadline
+	}
+	if extend > 0 {
+		from := time.Now().UTC()
+		if run.Budget.Deadline.After(from) {
+			from = run.Budget.Deadline
+		}
+		run.Budget.Deadline = from.Add(extend)
+	}
+
+	// A run parked by the per-stage attempt cap would re-trip immediately unless
+	// the counters are cleared: the human is explicitly saying "try again".
+	run.Attempts = map[string]int{}
+
+	run.Stage = run.LastStage
+	if run.Stage == "" {
+		run.Stage = firstDevelopmentStage(run)
+	}
+	if run.Stage == "" {
+		run.Stage = planner.Role
+	}
+	run.Status = StatusRunning
+	run.Reason = ""
+	run.UpdatedAt = time.Now().UTC()
+	o.event(run, EventResumed, run.Stage,
+		"resumed by a human at %s (+%d iterations)", run.Stage, grant).By(ActorHuman)
+	_ = o.store.Put(run)
+	o.start(run)
+	if r, ok, _ := o.store.Get(run.ID); ok {
+		return r, nil
+	}
+	return run, nil
+}
+
+// ReviewComment is one human note on a finished run's branch/PR.
+type ReviewComment struct {
+	Note       string
+	TargetRole string
+	File       string
+	Line       int
+}
+
+// Review decisions.
+const (
+	ReviewAccept         = "accept"
+	ReviewRequestChanges = "request_changes"
+)
+
+// Review applies a human's verdict on a run that produced a branch/PR. Accepting
+// is terminal; requesting changes turns each comment into a human Finding and
+// sends the run back through the factory.
+func (o *Orchestrator) Review(id, decision string, comments []ReviewComment) (*Run, error) {
+	run, ok, _ := o.store.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("coordinator: no run %s", id)
+	}
+	if run.Status != StatusPRReady && run.Status != StatusPROpen {
+		return run, fmt.Errorf("coordinator: run %s is %s, not pr_ready/pr_open", id, run.Status)
+	}
+
+	switch decision {
+	case ReviewAccept:
+		o.event(run, EventReviewAccepted, run.LastStage, "changes accepted by a human").By(ActorHuman)
+		o.stop(run, StatusAccepted, "accepted by human review")
+		if r, ok, _ := o.store.Get(run.ID); ok {
+			return r, nil
+		}
+		return run, nil
+
+	case ReviewRequestChanges:
+		if len(comments) == 0 {
+			return run, fmt.Errorf("coordinator: request_changes needs at least one comment")
+		}
+		fresh := make([]Finding, 0, len(comments))
+		for _, c := range comments {
+			if strings.TrimSpace(c.Note) == "" {
+				continue
+			}
+			fresh = append(fresh, Finding{
+				Source:     "human",
+				Severity:   "high",
+				Title:      c.Note,
+				TargetRole: c.TargetRole,
+				File:       c.File,
+				Line:       c.Line,
+			})
+		}
+		if len(fresh) == 0 {
+			return run, fmt.Errorf("coordinator: request_changes needs at least one non-empty comment")
+		}
+		run.Findings = append(run.Findings, fresh...)
+
+		target := factory.RouteRole(fresh, run.lastDeveloper())
+		if run.Attempts == nil {
+			run.Attempts = map[string]int{}
+		}
+		run.Attempts[target]++
+		if run.Attempts[target] > o.maxStageIter {
+			o.event(run, EventAttemptCap, target,
+				"%s already had %d fix attempts — parking for a human", target, o.maxStageIter)
+			o.stop(run, StatusNeedsHumanReview,
+				fmt.Sprintf("%s still failing review after %d fix attempts", target, o.maxStageIter))
+			if r, ok, _ := o.store.Get(run.ID); ok {
+				return r, nil
+			}
+			return run, nil
+		}
+
+		run.Status = StatusRunning
+		run.Stage = target
+		run.Reason = ""
+		run.UpdatedAt = time.Now().UTC()
+		o.event(run, EventReviewChanges, target,
+			"human requested changes (%d comments) → back to %s (attempt %d)",
+			len(fresh), target, run.Attempts[target]).
+			By(ActorHuman).WithDetail(renderComments(fresh))
+		_ = o.store.Put(run)
+		o.start(run)
+		if r, ok, _ := o.store.Get(run.ID); ok {
+			return r, nil
+		}
+		return run, nil
+
+	default:
+		return run, fmt.Errorf("coordinator: unknown review decision %q", decision)
+	}
+}
+
+func renderComments(fs []Finding) string {
+	var b strings.Builder
+	for _, f := range fs {
+		if f.File != "" {
+			fmt.Fprintf(&b, "- %s:%d — %s\n", f.File, f.Line, f.Title)
+		} else {
+			fmt.Fprintf(&b, "- %s\n", f.Title)
+		}
+	}
+	return b.String()
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // unfreeze extends the deadline by the time the run spent paused.
@@ -288,54 +512,75 @@ func (o *Orchestrator) drive(ctx context.Context, run *Run) {
 			return
 		}
 		if spent, reason := run.Budget.Exhausted(); spent {
+			o.event(run, EventBudgetExhausted, run.Stage, "%s — parking for a human", reason)
 			o.stop(run, StatusNeedsHumanReview, reason)
 			return
 		}
 		run.Budget.IterationsRemaining--
 
-		log.Printf("run %s: stage %s (budget %d left, attempt %d)",
-			run.ID, run.Stage, run.Budget.IterationsRemaining, run.Attempts[run.Stage])
+		stage, attempt := run.Stage, run.Attempts[run.Stage]
+		o.event(run, EventStageStarted, stage, "stage %s started (budget %d left, attempt %d)",
+			stage, run.Budget.IterationsRemaining, attempt).Attempt = attempt
+
 		started := time.Now()
 		res, err := o.engine.Run(ctx, run)
+		took := time.Since(started)
 		if err != nil {
-			log.Printf("run %s: stage %s FAILED after %s: %v",
-				run.ID, run.Stage, time.Since(started).Round(time.Second), err)
+			ev := o.event(run, EventStageFailed, stage, "stage %s FAILED after %s: %v",
+				stage, took.Round(time.Second), err)
+			ev.DurationMs, ev.Attempt = took.Milliseconds(), attempt
 			o.stop(run, StatusFailed, err.Error())
 			return
 		}
-		log.Printf("run %s: stage %s done in %s — %s (verdict=%q, %d findings)",
-			run.ID, run.Stage, time.Since(started).Round(time.Second), res.Task.Summary, res.Verdict, len(res.Findings))
+		ev := o.event(run, EventStageCompleted, stage, "stage %s done in %s — %s (verdict=%q, %d findings)",
+			stage, took.Round(time.Second), res.Task.Summary, res.Verdict, len(res.Findings))
+		ev.DurationMs, ev.Attempt = took.Milliseconds(), attempt
 
-		run.Tasks = append(run.Tasks, res.Task)
+		task := res.Task
+		task.Attempt = attempt
+		task.StartedAt = started.UTC()
+		task.DurationMs = took.Milliseconds()
+		if task.Verdict == "" {
+			task.Verdict = res.Verdict
+		}
+		task.Findings = res.Findings
+		run.Tasks = append(run.Tasks, task)
 		run.Findings = mergeFindings(run.Findings, res.Findings)
 		run.UpdatedAt = time.Now().UTC()
 
 		switch {
-		case run.Stage == planner.Role:
+		case stage == planner.Role:
 			o.applyPlan(run, res)
+			o.event(run, EventPlanReady, stage, "plan ready: %d tasks, approval required=%v",
+				len(run.PlanTasks), run.Approval != nil && run.Approval.Required).
+				WithDetail(run.Plan)
 			if run.Approval != nil && run.Approval.Required {
 				run.PausedAt = time.Now().UTC()
 				run.Status = StatusAwaitingApproval
+				run.LastStage = firstDevelopmentStage(run)
 				run.Stage = ""
+				o.event(run, EventAwaitingApproval, "", "awaiting human approval — %s", run.Approval.Reason)
 				_ = o.store.Put(run)
-				log.Printf("run %s: awaiting human approval — %s", run.ID, run.Approval.Reason)
 				return
 			}
 			run.Stage = firstDevelopmentStage(run)
 
-		case isReviewer(run.Stage) && res.Verdict == factory.VerdictRequestChanges:
+		case isReviewer(stage) && res.Verdict == factory.VerdictRequestChanges:
 			target := res.TargetRole
 			if !factory.IsDeveloperRole(target) {
 				target = factory.RouteRole(res.Findings, run.lastDeveloper())
 			}
 			run.Attempts[target]++
 			if run.Attempts[target] > o.maxStageIter {
+				o.event(run, EventAttemptCap, target,
+					"%s still failing review after %d fix attempts", target, o.maxStageIter)
 				o.stop(run, StatusNeedsHumanReview,
 					fmt.Sprintf("%s still failing review after %d fix attempts", target, o.maxStageIter))
 				return
 			}
-			log.Printf("run %s: %s requested changes → back to %s (attempt %d)",
-				run.ID, run.Stage, target, run.Attempts[target])
+			o.event(run, EventRequestChanges, target,
+				"%s requested changes → back to %s (attempt %d)", stage, target, run.Attempts[target]).
+				Attempt = run.Attempts[target]
 			run.Stage = target
 
 		default:
@@ -346,7 +591,6 @@ func (o *Orchestrator) drive(ctx context.Context, run *Run) {
 
 		if run.Stage == "" {
 			o.finish(ctx, run)
-			log.Printf("run %s: complete — status=%s", run.ID, run.Status)
 			return
 		}
 	}
@@ -386,8 +630,17 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 			o.stop(run, StatusPRReady, "commits ready on "+run.WorkBranch+" (push failed: "+err.Error()+")")
 			return
 		}
+		o.event(run, EventPushed, "", "branch %s pushed to origin", run.WorkBranch)
+
+		// A run coming back from human review already has a PR; re-opening it
+		// would 422 and silently demote the run to pr_ready.
+		if run.PRURL != "" {
+			o.stop(run, StatusPROpen, "PR updated: "+run.PRURL)
+			return
+		}
 		if url, _ := forge.OpenPR(ctx, run.RepoURL, run.BaseBranch, run.WorkBranch, run.PRD.Title, run.Plan); url != "" {
 			run.PRURL = url
+			o.event(run, EventPROpened, "", "pull request opened: %s", url)
 			o.stop(run, StatusPROpen, "PR opened: "+url)
 			return
 		}
@@ -408,10 +661,14 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 }
 
 func (o *Orchestrator) stop(run *Run, status Status, reason string) {
+	if run.Stage != "" {
+		run.LastStage = run.Stage // where Resume picks the run back up
+	}
 	run.Status = status
 	run.Reason = reason
 	run.Stage = ""
 	run.UpdatedAt = time.Now().UTC()
+	o.event(run, EventFinished, run.LastStage, "run %s — %s", status, orDash(reason))
 	_ = o.store.Put(run)
 }
 

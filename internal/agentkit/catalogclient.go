@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
@@ -87,17 +88,86 @@ func (c *CatalogClient) GetModel(ctx context.Context, role string) (modelext.Con
 	return modelConfigFromAPI(ok.Payload), nil
 }
 
-// GetAgentBaseURL returns the registered base URL for role.
-func (c *CatalogClient) GetAgentBaseURL(ctx context.Context, role string) (string, error) {
+// AgentInfo is one agent's registration, as the catalog holds it.
+type AgentInfo struct {
+	Role        string    `json:"role"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	BaseURL     string    `json:"baseURL"`
+	Transport   string    `json:"transport"`
+	Skills      []string  `json:"skills,omitempty"`
+	Concurrency int       `json:"concurrency"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// AgentDetail is a registration plus its model config and assembled AgentCard.
+type AgentDetail struct {
+	Info  AgentInfo       `json:"info"`
+	Model modelext.Config `json:"model"`
+	Card  map[string]any  `json:"card,omitempty"`
+}
+
+// ListAgents returns every agent registered with the catalog.
+func (c *CatalogClient) ListAgents(ctx context.Context) ([]AgentInfo, error) {
+	params := agents.NewListAgentsParams().WithContext(ctx)
+	ok, err := c.api.Agents.ListAgents(params)
+	if err != nil {
+		return nil, fmt.Errorf("agentkit: list agents: %w", err)
+	}
+	out := make([]AgentInfo, 0, len(ok.Payload))
+	for _, r := range ok.Payload {
+		out = append(out, agentInfoFromAPI(r))
+	}
+	return out, nil
+}
+
+// GetAgentDetail returns one agent's registration, model config and AgentCard.
+func (c *CatalogClient) GetAgentDetail(ctx context.Context, role string) (*AgentDetail, error) {
 	params := agents.NewGetAgentParams().WithContext(ctx).WithRole(role)
 	ok, err := c.api.Agents.GetAgent(params)
 	if err != nil {
-		return "", fmt.Errorf("agentkit: get agent %q: %w", role, err)
+		return nil, fmt.Errorf("agentkit: get agent %q: %w", role, err)
 	}
 	if ok.Payload == nil || ok.Payload.Registration == nil {
-		return "", fmt.Errorf("agentkit: agent %q has no registration", role)
+		return nil, fmt.Errorf("agentkit: agent %q has no registration", role)
 	}
-	return swag.StringValue(ok.Payload.Registration.BaseURL), nil
+	d := &AgentDetail{
+		Info:  agentInfoFromAPI(ok.Payload.Registration),
+		Model: modelConfigFromAPI(ok.Payload.ModelConfig),
+	}
+	if card, isMap := ok.Payload.AgentCard.(map[string]any); isMap {
+		d.Card = card
+	}
+	return d, nil
+}
+
+// GetAgentBaseURL returns the registered base URL for role.
+func (c *CatalogClient) GetAgentBaseURL(ctx context.Context, role string) (string, error) {
+	d, err := c.GetAgentDetail(ctx, role)
+	if err != nil {
+		return "", err
+	}
+	return d.Info.BaseURL, nil
+}
+
+func agentInfoFromAPI(r *models.AgentRegistration) AgentInfo {
+	if r == nil {
+		return AgentInfo{}
+	}
+	return AgentInfo{
+		Role:        swag.StringValue(r.Role),
+		Name:        swag.StringValue(r.Name),
+		Description: r.Description,
+		BaseURL:     swag.StringValue(r.BaseURL),
+		Transport:   swag.StringValue(r.Transport),
+		Skills:      r.Skills,
+		Concurrency: int(swag.Int64Value(r.Concurrency)),
+		Enabled:     swag.BoolValue(r.Enabled),
+		CreatedAt:   time.Time(r.CreatedAt),
+		UpdatedAt:   time.Time(r.UpdatedAt),
+	}
 }
 
 func modelConfigToAPI(c modelext.Config) *models.ModelConfig {

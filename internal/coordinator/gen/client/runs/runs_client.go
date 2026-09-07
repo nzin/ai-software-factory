@@ -79,6 +79,18 @@ type ClientService interface {
 	// RejectRunContext reject the plan replan with feedback or abandon the run.
 	RejectRunContext(ctx context.Context, params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error)
 
+	// ResumeRun restart a run parked in needs human review granting fresh budget.
+	ResumeRun(params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error)
+
+	// ResumeRunContext restart a run parked in needs human review granting fresh budget.
+	ResumeRunContext(ctx context.Context, params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error)
+
+	// ReviewRun human verdict on a finished run accept it or send it back with comments.
+	ReviewRun(params *ReviewRunParams, opts ...ClientOption) (*ReviewRunOK, error)
+
+	// ReviewRunContext human verdict on a finished run accept it or send it back with comments.
+	ReviewRunContext(ctx context.Context, params *ReviewRunParams, opts ...ClientOption) (*ReviewRunOK, error)
+
 	// SubmitPRD submit a p r d the factory runs it in the background.
 	SubmitPRD(params *SubmitPRDParams, opts ...ClientOption) (*SubmitPRDAccepted, error)
 
@@ -328,6 +340,134 @@ func (a *Client) RejectRunContext(ctx context.Context, params *RejectRunParams, 
 	//
 	// a default response is provided: fill this and return an error
 	unexpectedSuccess := result.(*RejectRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// ResumeRun restarts a run parked in needs human review granting fresh budget.
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.ResumeRunContext] instead.
+func (a *Client) ResumeRun(params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.ResumeRunContext(ctx, params, opts...)
+}
+
+// ResumeRunContext restarts a run parked in needs human review granting fresh budget.
+//
+// Do not use the deprecated [ResumeRunParams.Context] with this method: it would be ignored.
+func (a *Client) ResumeRunContext(ctx context.Context, params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewResumeRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "resumeRun",
+		Method:             "POST",
+		PathPattern:        "/v1/runs/{id}/resume",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ResumeRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*ResumeRunOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*ResumeRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// ReviewRun humen verdict on a finished run accept it or send it back with comments.
+//
+// Valid from status pr_ready or pr_open. "accept" is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
+// .
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.ReviewRunContext] instead.
+func (a *Client) ReviewRun(params *ReviewRunParams, opts ...ClientOption) (*ReviewRunOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.ReviewRunContext(ctx, params, opts...)
+}
+
+// ReviewRunContext humen verdict on a finished run accept it or send it back with comments.
+//
+// Valid from status pr_ready or pr_open. "accept" is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
+// .
+//
+// Do not use the deprecated [ReviewRunParams.Context] with this method: it would be ignored.
+func (a *Client) ReviewRunContext(ctx context.Context, params *ReviewRunParams, opts ...ClientOption) (*ReviewRunOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewReviewRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "reviewRun",
+		Method:             "POST",
+		PathPattern:        "/v1/runs/{id}/review",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ReviewRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*ReviewRunOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*ReviewRunDefault)
 
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
 }

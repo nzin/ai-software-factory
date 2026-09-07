@@ -55,7 +55,11 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 			return StageResult{}, err
 		}
 		return StageResult{
-			Task:     Task{Role: run.Stage, State: "completed", Summary: res.Summary, CommitSHA: res.CommitSHA},
+			Task: Task{
+				Role: run.Stage, State: "completed",
+				Summary: res.Summary, CommitSHA: res.CommitSHA,
+				FilesWritten: res.FilesWritten,
+			},
 			Findings: res.Findings,
 		}, nil
 
@@ -65,7 +69,7 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 			return StageResult{}, err
 		}
 		return StageResult{
-			Task:       Task{Role: run.Stage, State: "completed", Summary: res.Summary},
+			Task:       Task{Role: run.Stage, State: "completed", Summary: res.Summary, Verdict: res.Verdict},
 			Findings:   res.Findings,
 			Verdict:    res.Verdict,
 			TargetRole: res.TargetRole,

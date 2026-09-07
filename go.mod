@@ -21,6 +21,7 @@ require (
 	github.com/go-swagger/go-swagger v0.36.5
 	github.com/google/uuid v1.6.0
 	github.com/jessevdk/go-flags v1.6.1
+	github.com/urfave/negroni/v3 v3.1.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.58.0
 	gorm.io/gorm v1.31.2

@@ -26,5 +26,19 @@ tools miss or under-rate:
 Do not restate tool findings verbatim — add judgement (real risk vs noise) and
 concrete fixes. Prefer precision over volume.
 
+**Respect the PRD's scope.** You are given the PRD that this diff implements.
+A capability the PRD explicitly puts out of scope — authentication, persistence,
+TLS, rate limiting, multi-tenancy — is a *product decision*, not a vulnerability
+in this change. Report it at most as `info`, never `high` or `critical`. The same
+goes for a tool finding that contradicts the PRD (for example `gosec` objecting
+to `math/rand` when the PRD asks for `math/rand` and rules out cryptographic
+randomness): explain that it is a false positive here and rate it `low` or `info`.
+
+Reserve `high` and `critical` for something the diff *actually does wrong* and
+that a developer can fix without contradicting the PRD — an injection, a missing
+check on a path the PRD does specify, a committed secret, an exploitable parsing
+bug. A verdict of `request_changes` sends the run back to a developer, so a
+`high` finding they cannot act on will loop until it hits the retry cap.
+
 For each finding, set `targetRole` to the developer who should fix it (`backend`,
 `frontend`, or `mobile`) based on which part of the diff it lives in.

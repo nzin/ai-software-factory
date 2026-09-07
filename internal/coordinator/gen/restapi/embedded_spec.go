@@ -49,6 +49,69 @@ func init() {
         }
       }
     },
+    "/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The agent roster, read through from the catalog",
+        "operationId": "listAgents",
+        "responses": {
+          "200": {
+            "description": "the registered agents",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/AgentInfo"
+              }
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{role}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "One agent's registration, model config and assembled A2A AgentCard",
+        "operationId": "getAgentDetail",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "role",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the agent",
+            "schema": {
+              "$ref": "#/definitions/AgentDetail"
+            }
+          },
+          "404": {
+            "description": "no such agent",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/prd": {
       "post": {
         "description": "Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.\n",
@@ -214,9 +277,146 @@ func init() {
           }
         }
       }
+    },
+    "/v1/runs/{id}/resume": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Restart a run parked in needs_human_review, granting fresh budget",
+        "operationId": "resumeRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/ResumeRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/review": {
+      "post": {
+        "description": "Valid from status pr_ready or pr_open. \"accept\" is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
+        "tags": [
+          "runs"
+        ],
+        "summary": "Human verdict on a finished run — accept it, or send it back with comments",
+        "operationId": "reviewRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ReviewRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
+    "AgentDetail": {
+      "type": "object",
+      "properties": {
+        "agentCard": {
+          "description": "the assembled A2A AgentCard (free-form; mirrors a2a.AgentCard)",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "info": {
+          "$ref": "#/definitions/AgentInfo"
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        }
+      }
+    },
+    "AgentInfo": {
+      "type": "object",
+      "properties": {
+        "baseURL": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transport": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
     "ApprovalDecision": {
       "type": "object",
       "properties": {
@@ -289,6 +489,31 @@ func init() {
         }
       }
     },
+    "ModelConfig": {
+      "type": "object",
+      "properties": {
+        "effort": {
+          "type": "string"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "model": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "provider": {
+          "type": "string"
+        },
+        "thinking": {
+          "type": "string"
+        }
+      }
+    },
     "PRD": {
       "type": "object",
       "required": [
@@ -339,6 +564,67 @@ func init() {
         }
       }
     },
+    "ResumeRequest": {
+      "type": "object",
+      "properties": {
+        "abandon": {
+          "description": "if true, abandon the run instead of resuming it",
+          "type": "boolean"
+        },
+        "deadlineSeconds": {
+          "description": "extra wall-clock to grant, in seconds (0 = the server default)",
+          "type": "integer"
+        },
+        "iterationBudget": {
+          "description": "extra iterations to grant (0 = the server default top-up)",
+          "type": "integer"
+        }
+      }
+    },
+    "ReviewComment": {
+      "type": "object",
+      "required": [
+        "note"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "note": {
+          "description": "what needs to change",
+          "type": "string"
+        },
+        "targetRole": {
+          "description": "developer who should fix it; inferred when empty",
+          "type": "string"
+        }
+      }
+    },
+    "ReviewRequest": {
+      "type": "object",
+      "required": [
+        "decision"
+      ],
+      "properties": {
+        "comments": {
+          "description": "required (and non-empty) when decision is request_changes",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReviewComment"
+          }
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "accept",
+            "request_changes"
+          ]
+        }
+      }
+    },
     "Run": {
       "type": "object",
       "required": [
@@ -369,6 +655,13 @@ func init() {
           "type": "string",
           "format": "date-time"
         },
+        "events": {
+          "description": "the run's durable audit log, oldest first",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RunEvent"
+          }
+        },
         "findings": {
           "type": "array",
           "items": {
@@ -380,6 +673,10 @@ func init() {
         },
         "iterationsRemaining": {
           "type": "integer"
+        },
+        "lastStage": {
+          "description": "the stage the run stopped in; where resume picks it back up",
+          "type": "string"
         },
         "plan": {
           "type": "string"
@@ -448,10 +745,59 @@ func init() {
         }
       }
     },
+    "RunEvent": {
+      "description": "one entry in a run's durable audit log",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "type": "string",
+          "enum": [
+            "",
+            "system",
+            "human"
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "durationMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "description": "the run's status right after this event",
+          "type": "string"
+        }
+      }
+    },
     "RunSummary": {
       "type": "object",
       "properties": {
         "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deadline": {
           "type": "string",
           "format": "date-time"
         },
@@ -462,6 +808,9 @@ func init() {
           "type": "integer"
         },
         "prURL": {
+          "type": "string"
+        },
+        "repoKind": {
           "type": "string"
         },
         "repoURL": {
@@ -479,6 +828,9 @@ func init() {
         "updatedAt": {
           "type": "string",
           "format": "date-time"
+        },
+        "workBranch": {
+          "type": "string"
         }
       }
     },
@@ -511,16 +863,41 @@ func init() {
       }
     },
     "Task": {
+      "description": "one agent dispatch, with what that step produced",
       "type": "object",
       "properties": {
+        "attempt": {
+          "type": "integer"
+        },
         "commitSha": {
           "type": "string"
+        },
+        "durationMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "filesWritten": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "findings": {
+          "description": "the findings this step produced",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
         },
         "output": {
           "type": "string"
         },
         "role": {
           "type": "string"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
         },
         "state": {
           "type": "string"
@@ -529,6 +906,9 @@ func init() {
           "type": "string"
         },
         "taskID": {
+          "type": "string"
+        },
+        "verdict": {
           "type": "string"
         }
       }
@@ -570,6 +950,69 @@ func init() {
         }
       }
     },
+    "/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The agent roster, read through from the catalog",
+        "operationId": "listAgents",
+        "responses": {
+          "200": {
+            "description": "the registered agents",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/AgentInfo"
+              }
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{role}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "One agent's registration, model config and assembled A2A AgentCard",
+        "operationId": "getAgentDetail",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "role",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the agent",
+            "schema": {
+              "$ref": "#/definitions/AgentDetail"
+            }
+          },
+          "404": {
+            "description": "no such agent",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/prd": {
       "post": {
         "description": "Returns immediately with the run in its initial state. Poll GET /v1/runs/{id} for progress. A run may pause at status=awaiting_approval — resume it with POST /v1/runs/{id}/approve.\n",
@@ -735,9 +1178,146 @@ func init() {
           }
         }
       }
+    },
+    "/v1/runs/{id}/resume": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Restart a run parked in needs_human_review, granting fresh budget",
+        "operationId": "resumeRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "$ref": "#/definitions/ResumeRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{id}/review": {
+      "post": {
+        "description": "Valid from status pr_ready or pr_open. \"accept\" is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
+        "tags": [
+          "runs"
+        ],
+        "summary": "Human verdict on a finished run — accept it, or send it back with comments",
+        "operationId": "reviewRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/ReviewRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "schema": {
+              "$ref": "#/definitions/Run"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {
+    "AgentDetail": {
+      "type": "object",
+      "properties": {
+        "agentCard": {
+          "description": "the assembled A2A AgentCard (free-form; mirrors a2a.AgentCard)",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "info": {
+          "$ref": "#/definitions/AgentInfo"
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        }
+      }
+    },
+    "AgentInfo": {
+      "type": "object",
+      "properties": {
+        "baseURL": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/definitions/ModelConfig"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "transport": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
     "ApprovalDecision": {
       "type": "object",
       "properties": {
@@ -810,6 +1390,31 @@ func init() {
         }
       }
     },
+    "ModelConfig": {
+      "type": "object",
+      "properties": {
+        "effort": {
+          "type": "string"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "model": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "provider": {
+          "type": "string"
+        },
+        "thinking": {
+          "type": "string"
+        }
+      }
+    },
     "PRD": {
       "type": "object",
       "required": [
@@ -860,6 +1465,67 @@ func init() {
         }
       }
     },
+    "ResumeRequest": {
+      "type": "object",
+      "properties": {
+        "abandon": {
+          "description": "if true, abandon the run instead of resuming it",
+          "type": "boolean"
+        },
+        "deadlineSeconds": {
+          "description": "extra wall-clock to grant, in seconds (0 = the server default)",
+          "type": "integer"
+        },
+        "iterationBudget": {
+          "description": "extra iterations to grant (0 = the server default top-up)",
+          "type": "integer"
+        }
+      }
+    },
+    "ReviewComment": {
+      "type": "object",
+      "required": [
+        "note"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "note": {
+          "description": "what needs to change",
+          "type": "string"
+        },
+        "targetRole": {
+          "description": "developer who should fix it; inferred when empty",
+          "type": "string"
+        }
+      }
+    },
+    "ReviewRequest": {
+      "type": "object",
+      "required": [
+        "decision"
+      ],
+      "properties": {
+        "comments": {
+          "description": "required (and non-empty) when decision is request_changes",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReviewComment"
+          }
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "accept",
+            "request_changes"
+          ]
+        }
+      }
+    },
     "Run": {
       "type": "object",
       "required": [
@@ -890,6 +1556,13 @@ func init() {
           "type": "string",
           "format": "date-time"
         },
+        "events": {
+          "description": "the run's durable audit log, oldest first",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RunEvent"
+          }
+        },
         "findings": {
           "type": "array",
           "items": {
@@ -901,6 +1574,10 @@ func init() {
         },
         "iterationsRemaining": {
           "type": "integer"
+        },
+        "lastStage": {
+          "description": "the stage the run stopped in; where resume picks it back up",
+          "type": "string"
         },
         "plan": {
           "type": "string"
@@ -969,10 +1646,59 @@ func init() {
         }
       }
     },
+    "RunEvent": {
+      "description": "one entry in a run's durable audit log",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "type": "string",
+          "enum": [
+            "",
+            "system",
+            "human"
+          ]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "durationMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "description": "submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "status": {
+          "description": "the run's status right after this event",
+          "type": "string"
+        }
+      }
+    },
     "RunSummary": {
       "type": "object",
       "properties": {
         "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deadline": {
           "type": "string",
           "format": "date-time"
         },
@@ -983,6 +1709,9 @@ func init() {
           "type": "integer"
         },
         "prURL": {
+          "type": "string"
+        },
+        "repoKind": {
           "type": "string"
         },
         "repoURL": {
@@ -1000,6 +1729,9 @@ func init() {
         "updatedAt": {
           "type": "string",
           "format": "date-time"
+        },
+        "workBranch": {
+          "type": "string"
         }
       }
     },
@@ -1032,16 +1764,41 @@ func init() {
       }
     },
     "Task": {
+      "description": "one agent dispatch, with what that step produced",
       "type": "object",
       "properties": {
+        "attempt": {
+          "type": "integer"
+        },
         "commitSha": {
           "type": "string"
+        },
+        "durationMs": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "filesWritten": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "findings": {
+          "description": "the findings this step produced",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Finding"
+          }
         },
         "output": {
           "type": "string"
         },
         "role": {
           "type": "string"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
         },
         "state": {
           "type": "string"
@@ -1050,6 +1807,9 @@ func init() {
           "type": "string"
         },
         "taskID": {
+          "type": "string"
+        },
+        "verdict": {
           "type": "string"
         }
       }

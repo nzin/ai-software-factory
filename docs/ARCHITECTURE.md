@@ -129,7 +129,8 @@ queued → running ⇄ awaiting_approval          (planner gate; approve / rejec
    running → needs_human_review   (budget spent, or a role fails review 3×,
                                    or the coordinator restarted mid-run)
    running → failed    (unrecoverable engine error, or rejected+abandoned)
-pr_ready → { accepted (terminal) | changes_requested → running }   (Phase 5)
+pr_ready/pr_open → { accepted (terminal) | request_changes → running }
+needs_human_review → running          (resume with +budget) | failed (abandon)
 ```
 
 **TTL / budget** (`coordinator.Budget`, on every `Run`), whichever trips first:
@@ -141,8 +142,9 @@ pr_ready → { accepted (terminal) | changes_requested → running }   (Phase 5)
 
 When the budget is spent the orchestrator stops dispatching, sets
 `needs_human_review` with a `reason`, and keeps the partial artifacts. A human
-resume with +N budget is Phase 4 (UI); today `awaiting_approval` is the one
-resumable pause, via `POST /v1/runs/{id}/approve`.
+resumes it with +N budget from the UI (`POST /v1/runs/{id}/resume`) or abandons
+it; the other resumable pause is the planner gate, via
+`POST /v1/runs/{id}/approve`.
 
 **This is a state machine, not a DAG.** A DAG is acyclic; "security-reviewer
 finds an issue → back to the developer → back to the reviewer" is a cycle. The
@@ -158,12 +160,13 @@ routes the `Run` back to `targetRole` (a developer for an implementation bug, th
 planner for a design flaw), re-runs the affected reviewers, and repeats — bounded
 by the run budget and a per-stage `maxIterations` local guard.
 
-**PR review loop (Phase 5):** when a developer stage opens a PR the run enters
-`pr_ready`. The human either **accepts** (→ `accepted`, terminal; the human
-merges) or **requests changes** with comments — each comment becomes a
-`Finding{source:"human", targetRole}`, the run returns to `running` and
-re-enters the factory, spending `IterationsRemaining`. Budget already spent →
-`needs_human_review`.
+**PR review loop.** When the branch is ready the run enters `pr_ready` (or
+`pr_open` with a real GitHub PR). The human either **accepts** (→ `accepted`,
+terminal; the human merges) or **requests changes** with comments — each comment
+becomes a `Finding{source:"human", targetRole}`, the run returns to `running` and
+re-enters the factory, spending `IterationsRemaining`. Budget already spent, or
+too many rounds on one role → `needs_human_review`. Ingesting comments left on
+the GitHub PR itself (rather than in the UI) is Phase 5.
 
 **Engine abstraction.** `coordinator.Engine` (`Run(ctx, *Run) (StageResult,
 error)`) dispatches one stage. The default `pipelineEngine` discovers agents
@@ -172,6 +175,26 @@ through the catalog and dispatches over A2A; stage sequencing
 orchestrator (`plan.go`), not the engine. Tests substitute fakes (e.g. an
 always-`request_changes` engine that proves the attempt cap and budget halt the
 loop).
+
+**Human review of a finished run.** `POST /v1/runs/{id}/review` takes the human's
+verdict on a run in `pr_ready`/`pr_open`. **accept** → `accepted` (terminal).
+**request_changes** turns each comment into a
+`Finding{source:"human", severity:"high"}`, routes it with the same
+`factory.RouteRole` the reviewers use, bumps `Attempts[target]`, and drops the run
+back into `drive` at that developer — a fix pass, the reviewers, and a new
+revision on the same branch. Past `maxStageIter` it parks in
+`needs_human_review` instead. `POST /v1/runs/{id}/resume` un-sticks a parked run:
+it grants budget, **clears `Attempts`** (a run stopped by the retry cap would
+otherwise re-trip at once) and restarts at `Run.LastStage`.
+
+**Run event log.** `Run.Events` is the run's audit trail: one `Event{Seq, At,
+Kind, Stage, Status, Message, Detail, Attempt, DurationMs, Actor}` per
+transition, appended by `Orchestrator.event` — which also writes the same line to
+stdout, so the persisted log and the process log cannot drift. `Task` carries the
+per-step record (`Attempt`, `StartedAt`, `DurationMs`, `Verdict`, `FilesWritten`,
+`Findings`). Both ride along in the run's JSON blob, capped (500 events, 8 KiB of
+detail each) so one long run cannot bloat its store row. This is what the UI's
+run-detail timeline renders, and it survives a coordinator restart.
 
 **Durable runs.** Every transition is persisted through `coordinator.Store`.
 The default is in-memory; `internal/coordinator/runstore` is a GORM/SQLite
@@ -192,14 +215,39 @@ returns `202` immediately and the run drives on a background goroutine.
   crash-resume is `Recover()`. A worker pool, at-least-once dispatch, and
   multi-replica agents via `a2a-go` cluster mode are Phase 6.
 
-## Web UI (Phase 4)
+## Web UI
 
-Vue 3 SPA under `browser/asf-ui/`, built to `dist/` and served **by the
-coordinator** from the `go-swagger` editable `configure_coordinator.go`
-(`negroni.Static` with SPA fallback, or `//go:embed`) — the pattern from
+Vue 3 SPA under `browser/asf-ui/` (Vite + vue-router + axios + Element Plus),
+built to `dist/` and served **by the coordinator** — the pattern from
 `github.com/nzin/golang-skeleton` step5. One `coordinator serve` process serves
-both the API and the UI. Screens: submit a PRD, list PRDs, watch an active PRD
-and its per-agent tasks, and act on `needs_human_review` / `pr_ready`.
+the API under `/v1` and the SPA at `/`, so the browser is same-origin with both.
+
+**Serving** (`internal/coordinator/ui`, wired into `setupGlobalMiddleware` in the
+editable `configure_coordinator.go`): a negroni stack of
+`Recovery → Static → SPAFallback → the go-swagger router`. `negroni.Static`
+serves real files, but its `IndexFile` only applies when the path resolves to a
+*directory* — a deep link like `/runs/abc-123` misses and would reach the API's
+404 — so `SPAFallback` answers any GET/HEAD outside `/v1/`, `/healthz`, `/docs`
+and `/swagger.json` that accepts HTML with `index.html`. `ui.Dir()` returns `""`
+unless the directory exists *and* contains an `index.html`, and the static
+middleware is skipped entirely in that case: `http.Dir("")` resolves against the
+process working directory, so installing it with an empty path would serve the
+repo. That also means a coordinator built without the SPA just serves the API,
+which is why `make build` needs no Node toolchain.
+
+**Catalog BFF.** The catalog is a separate service on another port and neither
+service sets CORS headers, so the SPA cannot call it directly. Instead the
+coordinator exposes `GET /v1/agents` and `GET /v1/agents/{role}`, reading through
+with `agentkit.CatalogClient.ListAgents` / `GetAgentDetail`. The list endpoint
+fans the per-role detail out concurrently (the catalog's own `listAgents` returns
+registrations without the model config), degrading to a blank model column rather
+than failing if the catalog is slow.
+
+**Screens.** A runs kanban bucketed by status; a run detail with the event
+timeline, the per-step record, the plan, the findings and the raw JSON, plus an
+action bar that switches on status (approve/reject · resume/abandon ·
+accept/request-changes); a submit-PRD form; and the A2A catalog roster with a
+per-agent card view. Updates are by polling — SSE is Phase 6.
 
 ## Code generation
 

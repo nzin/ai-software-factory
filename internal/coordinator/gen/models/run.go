@@ -40,6 +40,9 @@ type Run struct {
 	// Format: date-time
 	Deadline strfmt.DateTime `json:"deadline,omitempty"`
 
+	// the run's durable audit log, oldest first
+	Events []*RunEvent `json:"events"`
+
 	// findings
 	Findings []*Finding `json:"findings"`
 
@@ -49,6 +52,9 @@ type Run struct {
 
 	// iterations remaining
 	IterationsRemaining int64 `json:"iterationsRemaining,omitempty"`
+
+	// the stage the run stopped in; where resume picks it back up
+	LastStage string `json:"lastStage,omitempty"`
 
 	// plan
 	Plan string `json:"plan,omitempty"`
@@ -107,6 +113,10 @@ func (m *Run) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateDeadline(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateEvents(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -186,6 +196,36 @@ func (m *Run) validateDeadline(formats strfmt.Registry) error {
 
 	if err := validate.FormatOf("deadline", "body", "date-time", m.Deadline.String(), formats); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (m *Run) validateEvents(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Events) { // not required
+		return nil
+	}
+
+	for i := 0; i < len(m.Events); i++ {
+		if typeutils.IsZero(m.Events[i]) { // not required
+			continue
+		}
+
+		if m.Events[i] != nil {
+			if err := m.Events[i].Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("events" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("events" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
 	}
 
 	return nil
@@ -425,6 +465,10 @@ func (m *Run) ContextValidate(ctx context.Context, formats strfmt.Registry) erro
 		res = append(res, err)
 	}
 
+	if err := m.contextValidateEvents(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateFindings(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -463,6 +507,35 @@ func (m *Run) contextValidateApproval(ctx context.Context, formats strfmt.Regist
 
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (m *Run) contextValidateEvents(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.Events); i++ {
+
+		if m.Events[i] != nil {
+
+			if typeutils.IsZero(m.Events[i]) { // not required
+				return nil
+			}
+
+			if err := m.Events[i].ContextValidate(ctx, formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("events" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("events" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
 	}
 
 	return nil

@@ -287,8 +287,27 @@ func (r *Repo) WriteFiles(files map[string]string) ([]string, error) {
 	return written, nil
 }
 
+// AddPaths force-stages paths, bypassing .gitignore.
+//
+// An agent that explicitly wrote a file must get it committed even when a
+// .gitignore it wrote in the same pass would exclude it. That is not
+// hypothetical: a model writing `/notes` to ignore its compiled binary also
+// excludes the notes/ source package, and `git add -A` would silently drop the
+// entire implementation from the commit.
+func (r *Repo) AddPaths(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	args := append([]string{"add", "-f", "--"}, paths...)
+	if out, err := git(ctx, r.Dir, args...); err != nil {
+		return fmt.Errorf("git add -f: %v: %s", err, out)
+	}
+	return nil
+}
+
 // Commit stages everything and commits. Returns the new HEAD sha, or ("", nil)
-// when there is nothing to commit.
+// when there is nothing to commit. Paths already staged (see AddPaths) stay
+// staged.
 func (r *Repo) Commit(ctx context.Context, role, msg string) (string, error) {
 	if out, err := git(ctx, r.Dir, "add", "-A"); err != nil {
 		return "", fmt.Errorf("git add: %v: %s", err, out)

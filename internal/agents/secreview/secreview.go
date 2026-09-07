@@ -17,7 +17,17 @@ import (
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
-const maxDiffBytes = 80_000
+const (
+	maxDiffBytes = 80_000
+	maxPRDBytes  = 12_000
+)
+
+func head(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n… (truncated)"
+}
 
 const outputContract = `
 After your analysis, output ONLY a JSON array of findings:
@@ -48,8 +58,17 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			diff = diff[:maxDiffBytes] + "\n… (diff truncated)"
 		}
 
-		user := fmt.Sprintf("# Static analysis findings\n\n%s\n\n# Diff to review\n\n```diff\n%s\n```\n%s",
-			renderFindings(toolFindings), diff, outputContract)
+		// The PRD is what makes severity judgeable: without it the reviewer
+		// rates explicitly out-of-scope requirements (auth, persistence, TLS) as
+		// high, which bounces the run back to a developer who cannot satisfy
+		// them without contradicting the PRD.
+		var b strings.Builder
+		if env.PRDText != "" {
+			fmt.Fprintf(&b, "# What was asked for (PRD)\n\n%s\n\n", head(env.PRDText, maxPRDBytes))
+		}
+		fmt.Fprintf(&b, "# Static analysis findings\n\n%s\n\n", renderFindings(toolFindings))
+		fmt.Fprintf(&b, "# Diff to review\n\n```diff\n%s\n```\n%s", diff, outputContract)
+		user := b.String()
 
 		out, err := client.Complete(ctx, systemPrompt, user)
 		if err != nil {

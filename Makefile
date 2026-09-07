@@ -13,9 +13,11 @@ endif
 
 KODUS_DIR := .kodus
 
-.PHONY: all gen build test vet demo tools clean up down logs compose-build kodus-up kodus-down
+UI_DIR := browser/asf-ui
 
-all: gen build test
+.PHONY: all gen build build_ui run_ui test test_ui vet demo tools clean up down logs compose-build kodus-up kodus-down
+
+all: gen build_ui build test
 
 ## tools: install pinned build tools (go-swagger)
 tools:
@@ -37,13 +39,28 @@ gen:
 	@go mod tidy
 
 ## build: compile every binary into ./bin
+## Deliberately Go-only: the coordinator serves the SPA if browser/asf-ui/dist
+## exists and just serves the API if it does not, so nobody needs Node to
+## compile, test or run the factory headless. Use `make build_ui` for the UI.
 build:
 	@mkdir -p bin
 	@go build -o bin/ ./cmd/...
 	@echo "built: $$(ls bin)"
 
+## build_ui: build the Vue SPA into browser/asf-ui/dist (needs Node >= 20)
+build_ui:
+	@cd $(UI_DIR) && (test -d node_modules || npm ci) && npm run build
+	@echo "built: $(UI_DIR)/dist"
+
+## run_ui: Vite dev server on :5173, proxying /v1 to a local coordinator
+run_ui:
+	@cd $(UI_DIR) && (test -d node_modules || npm ci) && npm run dev
+
 test:
 	@go test ./...
+
+test_ui:
+	@cd $(UI_DIR) && (test -d node_modules || npm ci) && npm test
 
 vet:
 	@go vet ./...
@@ -67,6 +84,7 @@ compose-build:
 ## up: build + start the factory (catalog, coordinator, all agents)
 up: compose-build
 	@docker compose up -d
+	@echo "web UI:      http://localhost:8090"
 	@echo "coordinator: http://localhost:8090   catalog: http://localhost:8080"
 
 ## down: stop the factory
@@ -98,4 +116,4 @@ kodus-down:
 	@cd $(KODUS_DIR) && docker compose down
 
 clean:
-	@rm -rf bin *.db /tmp/asf-demo* workspace
+	@rm -rf bin *.db /tmp/asf-demo* workspace $(UI_DIR)/dist

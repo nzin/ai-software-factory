@@ -4,24 +4,45 @@ package models
 
 import (
 	"context"
+	stderrors "errors"
+	"strconv"
 
+	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag/jsonutils"
+	"github.com/go-openapi/swag/typeutils"
+	"github.com/go-openapi/validate"
 )
 
-// Task task
+// Task one agent dispatch, with what that step produced
 //
 // swagger:model Task
 type Task struct {
 
+	// attempt
+	Attempt int64 `json:"attempt,omitempty"`
+
 	// commit sha
 	CommitSha string `json:"commitSha,omitempty"`
+
+	// duration ms
+	DurationMs int64 `json:"durationMs,omitempty"`
+
+	// files written
+	FilesWritten []string `json:"filesWritten"`
+
+	// the findings this step produced
+	Findings []*Finding `json:"findings"`
 
 	// output
 	Output string `json:"output,omitempty"`
 
 	// role
 	Role string `json:"role,omitempty"`
+
+	// started at
+	// Format: date-time
+	StartedAt strfmt.DateTime `json:"startedAt,omitempty"`
 
 	// state
 	State string `json:"state,omitempty"`
@@ -31,15 +52,111 @@ type Task struct {
 
 	// task ID
 	TaskID string `json:"taskID,omitempty"`
+
+	// verdict
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // Validate validates this task
-func (m *Task) Validate(_ strfmt.Registry) error {
+func (m *Task) Validate(formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.validateFindings(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateStartedAt(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
 	return nil
 }
 
-// ContextValidate validates this task based on context it is used
-func (m *Task) ContextValidate(_ context.Context, _ strfmt.Registry) error {
+func (m *Task) validateFindings(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Findings) { // not required
+		return nil
+	}
+
+	for i := 0; i < len(m.Findings); i++ {
+		if typeutils.IsZero(m.Findings[i]) { // not required
+			continue
+		}
+
+		if m.Findings[i] != nil {
+			if err := m.Findings[i].Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("findings" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("findings" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
+func (m *Task) validateStartedAt(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.StartedAt) { // not required
+		return nil
+	}
+
+	if err := validate.FormatOf("startedAt", "body", "date-time", m.StartedAt.String(), formats); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ContextValidate validate this task based on the context it is used
+func (m *Task) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.contextValidateFindings(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
+	return nil
+}
+
+func (m *Task) contextValidateFindings(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.Findings); i++ {
+
+		if m.Findings[i] != nil {
+
+			if typeutils.IsZero(m.Findings[i]) { // not required
+				return nil
+			}
+
+			if err := m.Findings[i].ContextValidate(ctx, formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("findings" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("findings" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 

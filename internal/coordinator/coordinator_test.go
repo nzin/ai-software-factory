@@ -259,6 +259,314 @@ func TestNextStageFixPassSkipsToSecurityReviewer(t *testing.T) {
 	}
 }
 
+// --- event log ---
+
+func kinds(r *Run) []string {
+	out := make([]string, 0, len(r.Events))
+	for _, e := range r.Events {
+		out = append(out, e.Kind)
+	}
+	return out
+}
+
+func hasKind(r *Run, kind string) bool {
+	for _, e := range r.Events {
+		if e.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEventLogRecordsTheWholeRun(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := waitTerminal(t, o, run.ID)
+
+	// The whole life of the run must be reconstructable from the log alone.
+	for _, want := range []string{
+		EventSubmitted, EventStageStarted, EventStageCompleted, EventPlanReady, EventFinished,
+	} {
+		if !hasKind(got, want) {
+			t.Fatalf("missing %q event; got %v", want, kinds(got))
+		}
+	}
+	if got.Events[0].Kind != EventSubmitted {
+		t.Fatalf("first event = %q, want submitted", got.Events[0].Kind)
+	}
+	if last := got.Events[len(got.Events)-1]; last.Kind != EventFinished {
+		t.Fatalf("last event = %q, want finished", last.Kind)
+	}
+	// Seq is monotonic so the UI can order without relying on timestamps.
+	for i, e := range got.Events {
+		if e.Seq != i+1 {
+			t.Fatalf("event %d has seq %d", i, e.Seq)
+		}
+		if e.At.IsZero() || e.Message == "" {
+			t.Fatalf("event %d is incomplete: %+v", i, e)
+		}
+	}
+	// A completed stage carries the timing the run-detail view shows.
+	for _, e := range got.Events {
+		if e.Kind == EventStageCompleted && e.DurationMs < 0 {
+			t.Fatalf("stage_completed has a negative duration: %+v", e)
+		}
+	}
+}
+
+func TestEventLogMarksHumanActions(t *testing.T) {
+	o := New(nil, WithEngine(gatedThenApprove{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	waitStatus(t, o, run.ID, StatusAwaitingApproval)
+	if _, err := o.Approve(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := waitTerminal(t, o, run.ID)
+
+	if !hasKind(got, EventAwaitingApproval) {
+		t.Fatalf("no awaiting_approval event: %v", kinds(got))
+	}
+	var approved *Event
+	for i := range got.Events {
+		if got.Events[i].Kind == EventApproved {
+			approved = &got.Events[i]
+		}
+	}
+	if approved == nil {
+		t.Fatalf("no approved event: %v", kinds(got))
+	}
+	if approved.Actor != ActorHuman {
+		t.Fatalf("approved event actor = %q, want human", approved.Actor)
+	}
+}
+
+func TestTaskRecordsPerStepDetail(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	got := waitTerminal(t, o, run.ID)
+
+	if len(got.Tasks) == 0 {
+		t.Fatal("no tasks recorded")
+	}
+	for i, task := range got.Tasks {
+		if task.StartedAt.IsZero() {
+			t.Fatalf("task %d (%s) has no StartedAt", i, task.Role)
+		}
+	}
+}
+
+// --- resume ---
+
+func TestResumeRestartsAtLastStage(t *testing.T) {
+	eng := &alwaysRequestChanges{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil),
+		WithMaxStageIterations(1), WithDefaults(100, time.Hour))
+
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	parked := waitTerminal(t, o, run.ID)
+	if parked.Status != StatusNeedsHumanReview {
+		t.Fatalf("status = %s, want needs_human_review", parked.Status)
+	}
+	if parked.LastStage == "" {
+		t.Fatal("LastStage was not recorded, so resume has nowhere to restart")
+	}
+	if parked.Attempts[factory.RoleBackendDeveloper] == 0 {
+		t.Fatal("expected a non-zero attempt count before resuming")
+	}
+	budgetBefore := parked.Budget.IterationsRemaining
+
+	resumed, err := o.Resume(run.ID, ResumeOptions{IterationBudget: 7})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if resumed.Budget.IterationsRemaining <= budgetBefore {
+		t.Fatalf("budget = %d, want more than %d", resumed.Budget.IterationsRemaining, budgetBefore)
+	}
+	// Without clearing the counters the attempt cap would trip again immediately.
+	if n := resumed.Attempts[factory.RoleBackendDeveloper]; n != 0 {
+		t.Fatalf("attempts not reset on resume: %d", n)
+	}
+	if !hasKind(resumed, EventResumed) {
+		t.Fatalf("no resumed event: %v", kinds(resumed))
+	}
+	waitTerminal(t, o, run.ID) // let the goroutine finish before the test ends
+}
+
+func TestResumeAbandons(t *testing.T) {
+	eng := &alwaysRequestChanges{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil), WithDefaults(3, time.Hour))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	waitStatus(t, o, run.ID, StatusNeedsHumanReview)
+
+	got, err := o.Resume(run.ID, ResumeOptions{Abandon: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusFailed {
+		t.Fatalf("status = %s, want failed", got.Status)
+	}
+}
+
+func TestResumeRejectsWrongStatus(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	waitTerminal(t, o, run.ID) // ends in `done`, not needs_human_review
+
+	if _, err := o.Resume(run.ID, ResumeOptions{}); err == nil {
+		t.Fatal("resume from a done run should fail")
+	}
+	if _, err := o.Resume("nope", ResumeOptions{}); err == nil {
+		t.Fatal("resume of an unknown run should fail")
+	}
+}
+
+// --- human review ---
+
+// prReady drives a run to pr_ready so the review endpoints have something to act
+// on: the planner emits a backend task and every other stage approves.
+type prReady struct{ calls int }
+
+func (p *prReady) Run(_ context.Context, run *Run) (StageResult, error) {
+	p.calls++
+	if run.Stage == "planner" {
+		return StageResult{Task: Task{Role: "planner", State: "completed", Output: "plan"}, Plan: backendPlan()}, nil
+	}
+	return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+}
+
+// driveToPRReady runs a fake pipeline to completion and forces the pr_ready
+// status a real workspace with commits would have produced.
+func driveToPRReady(t *testing.T, o *Orchestrator, id string) *Run {
+	t.Helper()
+	waitTerminal(t, o, id)
+	run, _, _ := o.store.Get(id)
+	run.Status = StatusPRReady
+	run.Reason = "branch ready"
+	if err := o.store.Put(run); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestReviewAcceptIsTerminal(t *testing.T) {
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	driveToPRReady(t, o, run.ID)
+
+	got, err := o.Review(run.ID, ReviewAccept, nil)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if got.Status != StatusAccepted {
+		t.Fatalf("status = %s, want accepted", got.Status)
+	}
+	if !got.Status.Terminal() {
+		t.Fatal("accepted should be terminal")
+	}
+	if !hasKind(got, EventReviewAccepted) {
+		t.Fatalf("no review_accepted event: %v", kinds(got))
+	}
+}
+
+func TestReviewRequestChangesReentersTheFactory(t *testing.T) {
+	eng := &prReady{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	driveToPRReady(t, o, run.ID)
+	callsBefore := eng.calls
+
+	got, err := o.Review(run.ID, ReviewRequestChanges, []ReviewComment{
+		{Note: "the roll endpoint accepts 0 dice", File: "internal/api/handlers.go", Line: 42},
+	})
+	if err != nil {
+		t.Fatalf("request_changes: %v", err)
+	}
+
+	// The comment becomes a routed finding, not a dropped note.
+	var human *Finding
+	for i := range got.Findings {
+		if got.Findings[i].Source == "human" {
+			human = &got.Findings[i]
+		}
+	}
+	if human == nil {
+		t.Fatalf("no human finding recorded: %+v", got.Findings)
+	}
+	if human.Title != "the roll endpoint accepts 0 dice" || human.File != "internal/api/handlers.go" {
+		t.Fatalf("human finding lost detail: %+v", human)
+	}
+	if !factory.IsDeveloperRole(got.Stage) && got.Status == StatusRunning {
+		t.Fatalf("run re-entered at %q, want a developer role", got.Stage)
+	}
+	if got.Attempts[factory.RoleBackendDeveloper] != 1 {
+		t.Fatalf("attempts = %v, want backend-developer at 1", got.Attempts)
+	}
+	if !hasKind(got, EventReviewChanges) {
+		t.Fatalf("no review_changes_requested event: %v", kinds(got))
+	}
+
+	final := waitTerminal(t, o, run.ID)
+	if eng.calls <= callsBefore {
+		t.Fatal("the engine was never re-dispatched after request_changes")
+	}
+	if final.Status == StatusFailed {
+		t.Fatalf("second pass failed: %s", final.Reason)
+	}
+}
+
+func TestReviewRequestChangesNeedsAComment(t *testing.T) {
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	driveToPRReady(t, o, run.ID)
+
+	if _, err := o.Review(run.ID, ReviewRequestChanges, nil); err == nil {
+		t.Fatal("request_changes with no comments should fail")
+	}
+	if _, err := o.Review(run.ID, ReviewRequestChanges, []ReviewComment{{Note: "   "}}); err == nil {
+		t.Fatal("request_changes with a blank comment should fail")
+	}
+}
+
+func TestReviewRejectsWrongStatusAndDecision(t *testing.T) {
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	waitTerminal(t, o, run.ID) // `done`, not pr_ready
+
+	if _, err := o.Review(run.ID, ReviewAccept, nil); err == nil {
+		t.Fatal("review of a done run should fail")
+	}
+	driveToPRReady(t, o, run.ID)
+	if _, err := o.Review(run.ID, "maybe", nil); err == nil {
+		t.Fatal("an unknown decision should fail")
+	}
+}
+
+func TestReviewCapsRepeatedRejections(t *testing.T) {
+	o := New(nil, WithEngine(&prReady{}), WithWorkspace(nil), WithMaxStageIterations(1))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+
+	comment := []ReviewComment{{Note: "still wrong", TargetRole: factory.RoleBackendDeveloper}}
+
+	driveToPRReady(t, o, run.ID)
+	if _, err := o.Review(run.ID, ReviewRequestChanges, comment); err != nil {
+		t.Fatal(err)
+	}
+	driveToPRReady(t, o, run.ID)
+	got, err := o.Review(run.ID, ReviewRequestChanges, comment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusNeedsHumanReview {
+		t.Fatalf("status = %s, want needs_human_review past the attempt cap", got.Status)
+	}
+	if !hasKind(got, EventAttemptCap) {
+		t.Fatalf("no attempt_cap event: %v", kinds(got))
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

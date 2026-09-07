@@ -138,6 +138,101 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /v1/runs/{id}/resume:
+    post:
+      tags: [runs]
+      operationId: resumeRun
+      summary: Restart a run parked in needs_human_review, granting fresh budget
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+        - name: body
+          in: body
+          required: false
+          schema:
+            $ref: "#/definitions/ResumeRequest"
+      responses:
+        200:
+          description: the run
+          schema:
+            $ref: "#/definitions/Run"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/runs/{id}/review:
+    post:
+      tags: [runs]
+      operationId: reviewRun
+      summary: Human verdict on a finished run — accept it, or send it back with comments
+      description: >
+        Valid from status pr_ready or pr_open. "accept" is terminal. With
+        "request_changes" every comment becomes a Finding{source:"human"} and the
+        run re-enters the factory at the responsible developer.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/ReviewRequest"
+      responses:
+        200:
+          description: the run
+          schema:
+            $ref: "#/definitions/Run"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/agents:
+    get:
+      tags: [agents]
+      operationId: listAgents
+      summary: The agent roster, read through from the catalog
+      responses:
+        200:
+          description: the registered agents
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/AgentInfo"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
+  /v1/agents/{role}:
+    get:
+      tags: [agents]
+      operationId: getAgentDetail
+      summary: One agent's registration, model config and assembled A2A AgentCard
+      parameters:
+        - name: role
+          in: path
+          required: true
+          type: string
+      responses:
+        200:
+          description: the agent
+          schema:
+            $ref: "#/definitions/AgentDetail"
+        404:
+          description: no such agent
+          schema:
+            $ref: "#/definitions/Error"
+        default:
+          description: error
+          schema:
+            $ref: "#/definitions/Error"
+
 definitions:
   Health:
     type: object
@@ -214,6 +309,137 @@ definitions:
         type: boolean
         description: if true, abandon the run instead of replanning
 
+  ResumeRequest:
+    type: object
+    properties:
+      iterationBudget:
+        type: integer
+        description: extra iterations to grant (0 = the server default top-up)
+      deadlineSeconds:
+        type: integer
+        description: extra wall-clock to grant, in seconds (0 = the server default)
+      abandon:
+        type: boolean
+        description: if true, abandon the run instead of resuming it
+
+  ReviewComment:
+    type: object
+    required: [note]
+    properties:
+      note:
+        type: string
+        description: what needs to change
+      targetRole:
+        type: string
+        description: developer who should fix it; inferred when empty
+      file:
+        type: string
+      line:
+        type: integer
+
+  ReviewRequest:
+    type: object
+    required: [decision]
+    properties:
+      decision:
+        type: string
+        enum: [accept, request_changes]
+      comments:
+        type: array
+        description: required (and non-empty) when decision is request_changes
+        items:
+          $ref: "#/definitions/ReviewComment"
+
+  ModelConfig:
+    type: object
+    properties:
+      provider:
+        type: string
+      model:
+        type: string
+      maxTokens:
+        type: integer
+        format: int64
+      effort:
+        type: string
+      thinking:
+        type: string
+      params:
+        type: object
+        additionalProperties: true
+
+  AgentInfo:
+    type: object
+    properties:
+      role:
+        type: string
+      name:
+        type: string
+      description:
+        type: string
+      baseURL:
+        type: string
+      transport:
+        type: string
+      skills:
+        type: array
+        items:
+          type: string
+      concurrency:
+        type: integer
+      enabled:
+        type: boolean
+      createdAt:
+        type: string
+        format: date-time
+      updatedAt:
+        type: string
+        format: date-time
+      model:
+        $ref: "#/definitions/ModelConfig"
+
+  AgentDetail:
+    type: object
+    properties:
+      info:
+        $ref: "#/definitions/AgentInfo"
+      model:
+        $ref: "#/definitions/ModelConfig"
+      agentCard:
+        type: object
+        additionalProperties: true
+        description: the assembled A2A AgentCard (free-form; mirrors a2a.AgentCard)
+
+  RunEvent:
+    type: object
+    description: one entry in a run's durable audit log
+    properties:
+      seq:
+        type: integer
+      at:
+        type: string
+        format: date-time
+      kind:
+        type: string
+        description: submitted | stage_started | stage_completed | stage_failed | plan_ready | awaiting_approval | approved | rejected | request_changes | attempt_cap | budget_exhausted | pushed | pr_opened | review_accepted | review_changes_requested | resumed | recovered | finished | truncated
+      stage:
+        type: string
+      status:
+        type: string
+        description: the run's status right after this event
+      message:
+        type: string
+      detail:
+        type: string
+      attempt:
+        type: integer
+      durationMs:
+        type: integer
+        format: int64
+      actor:
+        type: string
+        enum: ["", system, human]
+
   ApprovalDecision:
     type: object
     properties:
@@ -235,10 +461,17 @@ definitions:
         type: string
       repoURL:
         type: string
+      repoKind:
+        type: string
+      workBranch:
+        type: string
       prURL:
         type: string
       iterationsRemaining:
         type: integer
+      deadline:
+        type: string
+        format: date-time
       createdAt:
         type: string
         format: date-time
@@ -270,6 +503,7 @@ definitions:
 
   Task:
     type: object
+    description: one agent dispatch, with what that step produced
     properties:
       role:
         type: string
@@ -283,6 +517,25 @@ definitions:
         type: string
       output:
         type: string
+      attempt:
+        type: integer
+      startedAt:
+        type: string
+        format: date-time
+      durationMs:
+        type: integer
+        format: int64
+      verdict:
+        type: string
+      filesWritten:
+        type: array
+        items:
+          type: string
+      findings:
+        type: array
+        description: the findings this step produced
+        items:
+          $ref: "#/definitions/Finding"
 
   Run:
     type: object
@@ -297,6 +550,9 @@ definitions:
         enum: [queued, running, awaiting_approval, pr_ready, pr_open, accepted, changes_requested, needs_human_review, failed, done]
       stage:
         type: string
+      lastStage:
+        type: string
+        description: the stage the run stopped in; where resume picks it back up
       reason:
         type: string
         description: why the run stopped / is paused
@@ -340,6 +596,11 @@ definitions:
         type: array
         items:
           $ref: "#/definitions/Task"
+      events:
+        type: array
+        description: the run's durable audit log, oldest first
+        items:
+          $ref: "#/definitions/RunEvent"
       createdAt:
         type: string
         format: date-time
