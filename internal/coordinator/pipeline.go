@@ -16,11 +16,11 @@ import (
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
-// dispatchTimeout bounds one agent call. Developer agents stream a whole
-// codebase from the model at effort:high near the 128k output ceiling, which can
-// take 20+ minutes — well past a2a-go's 3-minute default. Kept just above
-// llm.callTimeout so the model call fails first with a useful error.
-const dispatchTimeout = 35 * time.Minute
+// dispatchTimeout bounds one agent call. A developer dispatch now runs the
+// model once per planner task (one commit each), so a whole role's work happens
+// under this single call — several sequential model calls, each itself bounded
+// by llm.callTimeout (30m). The run-level Budget.Deadline is the real cap.
+const dispatchTimeout = 90 * time.Minute
 
 // pipelineEngine dispatches stages to real A2A agents.
 type pipelineEngine struct {

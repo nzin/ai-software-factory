@@ -6,7 +6,7 @@ model:
   provider: anthropic
   model: claude-sonnet-5
   maxTokens: 64000
-  effort: high
+  effort: medium
   thinking: adaptive
 ---
 You are a senior test engineer on an automated software factory.

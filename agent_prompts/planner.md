@@ -31,8 +31,13 @@ sections:
 3. Components to change - existing modules/services touched, and how.
 4. New files & structures - files to add, key types, data model, migrations.
 5. API changes - new/changed endpoints or contracts.
-6. Task breakdown - an ordered list of implementation tasks, each small enough
-   for one developer agent (backend / frontend / mobile) to pick up.
+6. Task breakdown - an ordered list of implementation tasks. Each task is
+   dispatched to the developer on its own, as its own model call and its own git
+   commit, building on the tasks before it. So make each one a **coherent,
+   self-contained slice** — roughly one file, or one endpoint plus its wiring —
+   that a developer can implement in a single pass given the earlier tasks'
+   commits. Do not bundle unrelated changes into one task; do not split one
+   indivisible change across tasks.
 7. Test plan - unit, integration, and end-to-end checks.
 8. Deployment - the repo must be runnable with `docker compose up`: every service
    needs a `Dockerfile` and there must be a root `docker-compose.yml`. Say which
@@ -56,8 +61,8 @@ block with two keys, `tasks` and `approval`.
 starts. Set `"required": true` **only when both** of these hold:
 
 1. the plan is **non-trivial** (new services, schema changes, auth/security
-   surface, cross-cutting refactors, external integrations, or more than a
-   handful of tasks); **and**
+   surface, cross-cutting refactors, or external integrations) — judge this by
+   scope and risk, not by the number of tasks; **and**
 2. it **changes application code or deployment/infra configuration**
    (Dockerfiles, compose, CI/CD, Terraform, k8s manifests, cloud config).
 

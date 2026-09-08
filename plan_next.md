@@ -139,13 +139,31 @@
     (`ASF_DEFAULT_REPO` / `coordinator.WithDefaultRepo`). Produced branches
     persist on the host; the working trees don't.
 
+- **Phase 6.1 (done)** — per-task developer batching + a leaner model budget, to
+  stop the single-call JSON reply truncating on multi-file PRDs.
+  - A developer's **first pass** is now dispatched one planner task at a time
+    inside `devagent.Executor` (`runBatched`): one model call and one `git commit`
+    per task (`"<role>: <task title>"`), each call scoped to its task with the
+    earlier tasks' commits visible in the repo snapshot. Fix passes
+    (`Attempt > 0`), the test-engineer, and single/zero-task roles still run as
+    one call (`runOnce`). The coordinator is unchanged — it still sees one
+    `backend-developer` stage returning one aggregated `ResultEnvelope`, so
+    `plannedStages` / `nextStage` / the `indexOf` cursor are untouched.
+  - Developer + test-engineer prompts dropped to `effort: medium` (reasoning
+    tokens share the 128k `max_tokens` budget with the JSON output);
+    `thinking: adaptive` and `maxTokens: 128000` kept. `devagent.maxContextBytes`
+    60k → 40k. `pipeline.dispatchTimeout` 35m → 90m (a dispatch now covers a
+    whole role's tasks).
+  - Planner prompt asks for coherent, self-contained tasks (≈ one file or one
+    endpoint + wiring) and no longer counts task volume toward the approval gate.
+
 ### Known limitations still open
 
-- **Single-call codegen.** A developer agent still emits every file for all its
-  tasks as one JSON array. `effort: high` + `maxTokens: 128000` roughly doubled
-  the headroom and the `completeFiles` retry recovers a stray prose reply, so
-  sample-scale PRDs are fine — but a genuinely large PRD can still truncate.
-  Fix when it bites: dispatch developer tasks in **batches**, one commit each.
+- **Oversized single task.** Batching bounds each call to one task, but a single
+  task that itself spans many files can still truncate; `llm.CompleteStream`
+  returns the partial text with a `nil` error (`stop_reason == max_tokens`) and
+  `ExtractJSON` cannot tell truncated from absent. Follow-up: a typed truncation
+  error + salvage the complete leading elements of a cut-off array.
 - **`govulncheck` noise.** Findings are real stdlib CVEs reachable from generated
   code but not caused by it — consider down-ranking stdlib-only traces to `info`.
 

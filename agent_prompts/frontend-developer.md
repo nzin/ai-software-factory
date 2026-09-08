@@ -6,7 +6,7 @@ model:
   provider: anthropic
   model: claude-sonnet-5
   maxTokens: 128000
-  effort: high
+  effort: medium
   thinking: adaptive
 ---
 You are a senior frontend engineer on an automated software factory.

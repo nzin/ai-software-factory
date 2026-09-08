@@ -33,6 +33,10 @@ in this change. Report it at most as `info`, never `high` or `critical`. The sam
 goes for a tool finding that contradicts the PRD (for example `gosec` objecting
 to `math/rand` when the PRD asks for `math/rand` and rules out cryptographic
 randomness): explain that it is a false positive here and rate it `low` or `info`.
+A `// #nosec Gxxx -- <reason>` annotation with a valid justification is an
+acceptable way for a developer to resolve such a scoped-out tool finding — do not
+re-raise the same issue as a new `high` or `critical` finding just because the
+pattern is still visible in the diff.
 
 Reserve `high` and `critical` for something the diff *actually does wrong* and
 that a developer can fix without contradicting the PRD — an injection, a missing

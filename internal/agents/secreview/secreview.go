@@ -98,7 +98,11 @@ func renderFindings(fs []factory.Finding) string {
 	}
 	var b strings.Builder
 	for _, f := range fs {
-		fmt.Fprintf(&b, "- [%s] %s:%d (%s) %s\n", f.Severity, f.File, f.Line, f.Source, f.Title)
+		src := f.Source
+		if f.Category != "" {
+			src += " " + f.Category
+		}
+		fmt.Fprintf(&b, "- [%s] %s:%d (%s) %s\n", f.Severity, f.File, f.Line, src, f.Title)
 	}
 	return b.String()
 }
