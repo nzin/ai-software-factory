@@ -286,14 +286,15 @@ func (o *Orchestrator) Reject(id, feedback string, abandon bool) (*Run, error) {
 		return run, nil
 	}
 	o.unfreeze(run)
-	if feedback != "" {
-		run.PRD.Description += "\n\n## Reviewer feedback on the previous plan\n" + feedback
-	}
+	// Keep run.Plan as context for the revision; plannerInput folds it and the
+	// feedback into the next planner prompt. PlanFeedback is consumed by
+	// applyPlan once the planner reruns.
+	run.PlanFeedback = feedback
 	run.Status = StatusRunning
 	run.Stage = planner.Role
-	run.Plan, run.PlanTasks, run.Approval = "", nil, nil
+	run.PlanTasks, run.Approval = nil, nil
 	run.UpdatedAt = time.Now().UTC()
-	o.event(run, EventRejected, run.Stage, "plan rejected by a human — replanning").
+	o.event(run, EventRejected, run.Stage, "plan sent back for revision by a human").
 		By(ActorHuman).WithDetail(feedback)
 	_ = o.store.Put(run)
 	o.start(run)
@@ -303,25 +304,58 @@ func (o *Orchestrator) Reject(id, feedback string, abandon bool) (*Run, error) {
 	return run, nil
 }
 
-// ResumeOptions are the knobs on un-sticking a needs_human_review run.
+// ResumeOptions are the knobs on un-sticking a needs_human_review or failed run.
 type ResumeOptions struct {
 	IterationBudget int           // extra iterations to grant (0 = a default top-up)
 	Deadline        time.Duration // extra wall-clock to grant (0 = a default top-up)
 	Abandon         bool
+	// Accept takes the run's branch as-is (push / open PR) and stops, skipping
+	// the remaining pipeline stages.
+	Accept bool
+	// Comment is human guidance: recorded as a high-severity finding and routed
+	// to the responsible developer for a fix pass on resume.
+	Comment    string
+	TargetRole string // developer the comment routes to; inferred when empty
 }
 
-// Resume restarts a run parked in needs_human_review, granting fresh budget.
-func (o *Orchestrator) Resume(id string, opts ResumeOptions) (*Run, error) {
+// Resume restarts a run parked in needs_human_review or failed, granting fresh
+// budget. With a Comment the note steers a developer fix pass; with Accept the
+// branch is taken as-is.
+func (o *Orchestrator) Resume(ctx context.Context, id string, opts ResumeOptions) (*Run, error) {
 	run, ok, _ := o.store.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("coordinator: no run %s", id)
 	}
-	if run.Status != StatusNeedsHumanReview {
-		return run, fmt.Errorf("coordinator: run %s is %s, not needs_human_review", id, run.Status)
+	if run.Status != StatusNeedsHumanReview && run.Status != StatusFailed {
+		return run, fmt.Errorf("coordinator: run %s is %s, not needs_human_review or failed", id, run.Status)
 	}
 	if opts.Abandon {
 		o.event(run, EventRejected, run.LastStage, "abandoned by a human").By(ActorHuman)
 		o.stop(run, StatusFailed, "abandoned by human")
+		if r, ok, _ := o.store.Get(run.ID); ok {
+			return r, nil
+		}
+		return run, nil
+	}
+	if opts.Accept {
+		if run.WorkspaceDir == "" {
+			o.event(run, EventReviewAccepted, run.LastStage, "parked run accepted as-is by a human").By(ActorHuman)
+			o.finish(ctx, run)
+			if r, ok, _ := o.store.Get(run.ID); ok {
+				return r, nil
+			}
+			return run, nil
+		}
+		repo, err := workspace.Open(ctx, run.WorkspaceDir)
+		if err != nil {
+			return run, fmt.Errorf("coordinator: cannot accept run %s: %w", id, err)
+		}
+		repo.BaseBranch = run.BaseBranch
+		if !repo.HasCommits(ctx) {
+			return run, fmt.Errorf("coordinator: nothing to accept — run %s produced no commits", id)
+		}
+		o.event(run, EventReviewAccepted, run.LastStage, "parked run accepted as-is by a human").By(ActorHuman)
+		o.finish(ctx, run)
 		if r, ok, _ := o.store.Get(run.ID); ok {
 			return r, nil
 		}
@@ -350,24 +384,72 @@ func (o *Orchestrator) Resume(id string, opts ResumeOptions) (*Run, error) {
 	// the counters are cleared: the human is explicitly saying "try again".
 	run.Attempts = map[string]int{}
 
-	run.Stage = run.LastStage
-	if run.Stage == "" {
-		run.Stage = firstDevelopmentStage(run)
-	}
-	if run.Stage == "" {
+	comment := strings.TrimSpace(opts.Comment)
+	switch {
+	case comment != "" && len(run.PlanTasks) > 0:
+		// Steer a developer fix pass with the note, exactly like Review's
+		// request_changes path: a human finding, routed, with Attempt>0 so the
+		// dispatch carries it into the "# Fix pass" prompt block.
+		f := Finding{Source: "human", Severity: "high", Title: comment, TargetRole: opts.TargetRole}
+		run.Findings = append(run.Findings, f)
+		target := factory.RouteRole([]Finding{f}, run.lastDeveloper())
+		run.Attempts[target] = 1
+		run.Stage = target
+		o.event(run, EventResumed, run.Stage,
+			"resumed by a human with a comment → %s (attempt 1, +%d iterations)", target, grant).
+			By(ActorHuman).WithDetail(comment)
+	case comment != "":
+		// No plan yet (a planner-stage failure): the note goes on the PRD the
+		// way Reject does, and the run replans.
+		run.PRD.Description += "\n\n## Operator note\n" + comment
 		run.Stage = planner.Role
+		o.event(run, EventResumed, run.Stage,
+			"resumed by a human with a comment — replanning (+%d iterations)", grant).
+			By(ActorHuman).WithDetail(comment)
+	default:
+		run.Stage = run.LastStage
+		if run.Stage == "" {
+			run.Stage = firstDevelopmentStage(run)
+		}
+		if run.Stage == "" {
+			run.Stage = planner.Role
+		}
+		o.event(run, EventResumed, run.Stage,
+			"resumed by a human at %s (+%d iterations)", run.Stage, grant).By(ActorHuman)
 	}
+
 	run.Status = StatusRunning
 	run.Reason = ""
 	run.UpdatedAt = time.Now().UTC()
-	o.event(run, EventResumed, run.Stage,
-		"resumed by a human at %s (+%d iterations)", run.Stage, grant).By(ActorHuman)
 	_ = o.store.Put(run)
 	o.start(run)
 	if r, ok, _ := o.store.Get(run.ID); ok {
 		return r, nil
 	}
 	return run, nil
+}
+
+// Delete removes a terminal run and its workspace. It refuses a run that is
+// still queued/running/awaiting_approval or has a live drive goroutine.
+func (o *Orchestrator) Delete(ctx context.Context, id string) error {
+	run, ok, _ := o.store.Get(id)
+	if !ok {
+		return fmt.Errorf("coordinator: no run %s", id)
+	}
+	if !run.Status.Terminal() {
+		return fmt.Errorf("coordinator: run %s is %s, not a terminal state", id, run.Status)
+	}
+	o.mu.Lock()
+	driving := o.driving[id]
+	o.mu.Unlock()
+	if driving {
+		return fmt.Errorf("coordinator: run %s is still running", id)
+	}
+
+	if o.workspace != nil && run.WorkspaceDir != "" {
+		_ = o.workspace.Remove(ctx, run.ID, nil) // best-effort; may already be pruned
+	}
+	return o.store.Delete(id)
 }
 
 // ReviewComment is one human note on a finished run's branch/PR.
@@ -385,9 +467,10 @@ const (
 )
 
 // Review applies a human's verdict on a run that produced a branch/PR. Accepting
-// is terminal; requesting changes turns each comment into a human Finding and
+// (re-)pushes the work branch to origin, opens the PR when possible, and is
+// terminal; requesting changes turns each comment into a human Finding and
 // sends the run back through the factory.
-func (o *Orchestrator) Review(id, decision string, comments []ReviewComment) (*Run, error) {
+func (o *Orchestrator) Review(ctx context.Context, id, decision string, comments []ReviewComment) (*Run, error) {
 	run, ok, _ := o.store.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("coordinator: no run %s", id)
@@ -399,7 +482,19 @@ func (o *Orchestrator) Review(id, decision string, comments []ReviewComment) (*R
 	switch decision {
 	case ReviewAccept:
 		o.event(run, EventReviewAccepted, run.LastStage, "changes accepted by a human").By(ActorHuman)
-		o.stop(run, StatusAccepted, "accepted by human review")
+		// The branch was normally pushed when the run first reached pr_ready, but
+		// that push may have failed (unreachable origin) — retry it here so an
+		// accepted run always lands on origin. Best-effort: a failure is surfaced
+		// in the reason, not blocking the accept.
+		reason := "accepted by human review"
+		if err := o.deliver(ctx, run); err != nil {
+			reason = "accepted by human review (push failed: " + err.Error() + ")"
+		} else if run.PRURL != "" {
+			reason = "accepted by human review — " + run.PRURL
+		} else if run.RepoKind == string(workspace.KindLocal) || run.RepoKind == string(workspace.KindRemote) {
+			reason = "accepted by human review — branch " + run.WorkBranch + " pushed to origin"
+		}
+		o.stop(run, StatusAccepted, reason)
 		if r, ok, _ := o.store.Get(run.ID); ok {
 			return r, nil
 		}
@@ -468,7 +563,7 @@ func (o *Orchestrator) Review(id, decision string, comments []ReviewComment) (*R
 // the existing Review path. It never fails loudly: an unmatched or stale event
 // returns an error the webhook handler logs and answers 202, so GitHub does not
 // keep retrying.
-func (o *Orchestrator) IngestPRReview(r forge.PRReview) (*Run, error) {
+func (o *Orchestrator) IngestPRReview(ctx context.Context, r forge.PRReview) (*Run, error) {
 	run := o.matchPR(r)
 	if run == nil {
 		return nil, fmt.Errorf("coordinator: no run matches PR %s (branch %q)", r.PRURL, r.HeadRef)
@@ -478,7 +573,7 @@ func (o *Orchestrator) IngestPRReview(r forge.PRReview) (*Run, error) {
 	}
 
 	if r.State == "approved" {
-		res, err := o.Review(run.ID, ReviewAccept, nil)
+		res, err := o.Review(ctx, run.ID, ReviewAccept, nil)
 		if err == nil {
 			o.event(res, EventReviewAccepted, res.LastStage,
 				"PR approved on GitHub by %s", orDash(r.Author)).By(ActorHuman)
@@ -497,7 +592,7 @@ func (o *Orchestrator) IngestPRReview(r forge.PRReview) (*Run, error) {
 		_ = o.store.Put(run)
 		return run, nil
 	}
-	res, err := o.Review(run.ID, ReviewRequestChanges, comments)
+	res, err := o.Review(ctx, run.ID, ReviewRequestChanges, comments)
 	if err == nil {
 		// annotate the event Review just wrote so the timeline shows the source
 		if n := len(res.Events); n > 0 {
@@ -683,6 +778,7 @@ func (o *Orchestrator) applyPlan(run *Run, res StageResult) {
 	} else if res.Task.Output != "" {
 		run.Plan = res.Task.Output
 	}
+	run.PlanFeedback = "" // consumed: the planner has produced a fresh plan
 }
 
 func (o *Orchestrator) finish(ctx context.Context, run *Run) {
@@ -703,30 +799,22 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 
 	switch run.RepoKind {
 	case string(workspace.KindRemote), string(workspace.KindLocal):
-		if err := repo.Push(ctx); err != nil {
+		// A run coming back from human review already has a PR; deliver() then
+		// only re-pushes (re-opening would 422 and silently demote to pr_ready).
+		hadPR := run.PRURL != ""
+		if err := o.deliver(ctx, run); err != nil {
 			o.stop(run, StatusPRReady, "commits ready on "+run.WorkBranch+" (push failed: "+err.Error()+")")
 			return
 		}
-		o.event(run, EventPushed, "", "branch %s pushed to %s", run.WorkBranch, run.RepoURL)
-
-		// A run coming back from human review already has a PR; re-opening it
-		// would 422 and silently demote the run to pr_ready.
-		if run.PRURL != "" {
+		switch {
+		case hadPR:
 			o.stop(run, StatusPROpen, "PR updated: "+run.PRURL)
-			return
-		}
-		// OpenPR is a no-op ("", nil) for a file:// / non-GitHub origin, so the
-		// local-repo case falls straight through to pr_ready.
-		if url, _ := forge.OpenPR(ctx, run.RepoURL, run.BaseBranch, run.WorkBranch, run.PRD.Title, run.Plan); url != "" {
-			run.PRURL = url
-			o.event(run, EventPROpened, "", "pull request opened: %s", url)
-			o.stop(run, StatusPROpen, "PR opened: "+url)
-			return
-		}
-		if run.RepoKind == string(workspace.KindLocal) {
+		case run.PRURL != "":
+			o.stop(run, StatusPROpen, "PR opened: "+run.PRURL)
+		case run.RepoKind == string(workspace.KindLocal):
 			o.stop(run, StatusPRReady, fmt.Sprintf(
 				"branch %s pushed to %s — `git checkout %s`", run.WorkBranch, run.RepoURL, run.WorkBranch))
-		} else {
+		default:
 			o.stop(run, StatusPRReady, "branch "+run.WorkBranch+" pushed to origin")
 		}
 
@@ -737,6 +825,44 @@ func (o *Orchestrator) finish(ctx context.Context, run *Run) {
 	if o.workspace != nil {
 		_ = o.workspace.Prune(o.pruneKeep)
 	}
+}
+
+// deliver pushes the run's work branch to its origin and, for a GitHub remote
+// with a token, opens a PR (recording pushed / pr_opened events and run.PRURL).
+// It leaves the run's status to the caller. A missing workspace, a commit-less
+// branch, or a "new" repo (no origin) is a no-op. A push failure is returned.
+//
+// git push is idempotent — a branch already on origin exits "Everything
+// up-to-date" — so this is safe to call again from the human-accept path.
+func (o *Orchestrator) deliver(ctx context.Context, run *Run) error {
+	if run.WorkspaceDir == "" {
+		return nil
+	}
+	if run.RepoKind != string(workspace.KindRemote) && run.RepoKind != string(workspace.KindLocal) {
+		return nil
+	}
+	repo, err := workspace.Open(ctx, run.WorkspaceDir)
+	if err != nil {
+		return fmt.Errorf("workspace unavailable: %w", err)
+	}
+	repo.BaseBranch = run.BaseBranch
+	if !repo.HasCommits(ctx) {
+		return nil
+	}
+	if err := repo.Push(ctx); err != nil {
+		return err
+	}
+	o.event(run, EventPushed, "", "branch %s pushed to %s", run.WorkBranch, run.RepoURL)
+
+	// OpenPR is a no-op ("", nil) for a file:// / non-GitHub origin, so the
+	// local-repo case simply keeps run.PRURL empty.
+	if run.PRURL == "" {
+		if url, _ := forge.OpenPR(ctx, run.RepoURL, run.BaseBranch, run.WorkBranch, run.PRD.Title, run.Plan); url != "" {
+			run.PRURL = url
+			o.event(run, EventPROpened, "", "pull request opened: %s", url)
+		}
+	}
+	return nil
 }
 
 func (o *Orchestrator) stop(run *Run, status Status, reason string) {

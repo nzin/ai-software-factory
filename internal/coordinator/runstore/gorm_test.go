@@ -58,6 +58,26 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDelete(t *testing.T) {
+	st := openTemp(t)
+	now := time.Now().UTC()
+	if err := st.Put(&coordinator.Run{ID: "r1", Status: coordinator.StatusFailed, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Delete("r1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok, _ := st.Get("r1"); ok {
+		t.Fatal("run still present after delete")
+	}
+	if all, _ := st.All(); len(all) != 0 {
+		t.Fatalf("All() not empty: %+v", all)
+	}
+	if err := st.Delete("missing"); err != nil {
+		t.Fatalf("deleting a missing row should be a no-op, got %v", err)
+	}
+}
+
 func TestRecoverParksRunningRuns(t *testing.T) {
 	st := openTemp(t)
 	now := time.Now().UTC()

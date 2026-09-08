@@ -165,7 +165,7 @@ func parseGoErrors(out string) []factory.Finding {
 			Line:       atoi(m[2]),
 			Title:      truncate(m[3], 200),
 			Suggestion: "fix the compile error so `go build ./...` and `go test ./...` pass",
-			TargetRole: routeByPath(file),
+			TargetRole: factory.RoleForPath(file),
 		})
 		if len(findings) >= 20 {
 			break
@@ -419,22 +419,6 @@ func packageDirs(dir string) []string {
 		return nil
 	})
 	return dirs
-}
-
-func routeByPath(file string) string {
-	switch strings.ToLower(filepath.Ext(file)) {
-	case ".go":
-		return factory.RoleBackendDeveloper
-	case ".vue", ".ts", ".tsx", ".jsx", ".css", ".scss":
-		return factory.RoleFrontendDev
-	}
-	if strings.HasSuffix(file, "go.mod") || strings.HasSuffix(file, "go.sum") {
-		return factory.RoleBackendDeveloper
-	}
-	if strings.HasSuffix(file, "package.json") {
-		return factory.RoleFrontendDev
-	}
-	return ""
 }
 
 func shortRel(base, p string) string {

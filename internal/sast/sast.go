@@ -21,7 +21,7 @@ func All(ctx context.Context, dir string) []factory.Finding {
 		out = append(out, Go(ctx, dir)...)
 	}
 	for _, pkgDir := range npmDirs(dir) {
-		out = append(out, NPM(ctx, pkgDir)...)
+		out = append(out, NPM(ctx, dir, pkgDir)...)
 	}
 	return out
 }
@@ -55,13 +55,15 @@ func gosec(ctx context.Context, dir string) []factory.Finding {
 	}
 	out := make([]factory.Finding, 0, len(report.Issues))
 	for _, is := range report.Issues {
+		file := rel(dir, is.File)
 		out = append(out, factory.Finding{
-			Source:   "gosec",
-			Severity: strings.ToLower(is.Severity),
-			Category: is.RuleID,
-			File:     rel(dir, is.File),
-			Line:     atoi(strings.SplitN(is.Line, "-", 2)[0]),
-			Title:    is.Details,
+			Source:     "gosec",
+			Severity:   strings.ToLower(is.Severity),
+			Category:   is.RuleID,
+			File:       file,
+			Line:       atoi(strings.SplitN(is.Line, "-", 2)[0]),
+			Title:      is.Details,
+			TargetRole: factory.RoleForPath(file),
 		})
 	}
 	return out
@@ -117,6 +119,7 @@ func parseGovulncheck(stdout []byte, dir string) []factory.Finding {
 		fnd := factory.Finding{Source: "govulncheck", Severity: "high", Category: f.OSV, Title: osvSummary[f.OSV]}
 		if p := f.Trace[0].Position; p != nil {
 			fnd.File, fnd.Line = rel(dir, p.Filename), p.Line
+			fnd.TargetRole = factory.RoleForPath(fnd.File)
 		}
 		if fnd.Title == "" {
 			fnd.Title = "Vulnerable dependency: " + f.OSV
@@ -126,14 +129,21 @@ func parseGovulncheck(stdout []byte, dir string) []factory.Finding {
 	return out
 }
 
-// NPM runs `npm audit --json` in a directory containing package.json.
-func NPM(ctx context.Context, dir string) []factory.Finding {
+// NPM runs `npm audit --omit=dev --json` in pkgDir (a directory containing a
+// package.json). --omit=dev keeps devDependency advisories (build/test tooling
+// that never ships) out of the results. root is the repo root, used to make the
+// finding path repo-relative so it can be routed to the owning developer.
+func NPM(ctx context.Context, root, pkgDir string) []factory.Finding {
 	if _, err := exec.LookPath("npm"); err != nil {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "npm", "audit", "--json")
-	cmd.Dir = dir
+	cmd := exec.CommandContext(ctx, "npm", "audit", "--omit=dev", "--json")
+	cmd.Dir = pkgDir
 	stdout, _ := cmd.Output()
+	return parseNPMAudit(stdout, root, pkgDir)
+}
+
+func parseNPMAudit(stdout []byte, root, pkgDir string) []factory.Finding {
 	var report struct {
 		Vulnerabilities map[string]struct {
 			Severity string `json:"severity"`
@@ -144,6 +154,8 @@ func NPM(ctx context.Context, dir string) []factory.Finding {
 	if json.Unmarshal(stdout, &report) != nil {
 		return nil
 	}
+	file := rel(root, filepath.Join(pkgDir, "package.json"))
+	owner := factory.RoleForPath(file)
 	var out []factory.Finding
 	for name, v := range report.Vulnerabilities {
 		title := "Vulnerable dependency: " + name
@@ -156,11 +168,12 @@ func NPM(ctx context.Context, dir string) []factory.Finding {
 			}
 		}
 		out = append(out, factory.Finding{
-			Source:   "npm-audit",
-			Severity: strings.ToLower(v.Severity),
-			Category: "dependency",
-			File:     rel(dir, filepath.Join(dir, "package.json")),
-			Title:    title,
+			Source:     "npm-audit",
+			Severity:   strings.ToLower(v.Severity),
+			Category:   "dependency",
+			File:       file,
+			Title:      title,
+			TargetRole: owner,
 		})
 	}
 	return out

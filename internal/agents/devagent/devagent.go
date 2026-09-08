@@ -5,12 +5,19 @@
 //
 // A developer's first pass is dispatched one planner task at a time — one model
 // call and one git commit per task — so no single call has to emit a whole
-// codebase (which truncates the JSON reply). Fix passes and the test-engineer
-// run as a single call.
+// codebase (which truncates the reply). Fix passes and the test-engineer run as
+// a single call.
+//
+// Files come back in an escaping-free block format ("=== FILE: <path> ===" …
+// "=== END FILE: <path> ==="), not a JSON array: a model cannot corrupt raw file
+// bytes with an unescaped newline or quote, and an unterminated final block is a
+// detectable truncation rather than an unparseable blob. A legacy JSON array and
+// a bare "NO CHANGES" are still accepted.
 package devagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -32,23 +39,29 @@ type Completer interface {
 	Complete(ctx context.Context, system, user string) (string, error)
 }
 
-const outputContract = `
-Return ONLY a JSON array of files to write, no prose:
+const outputContract = "\n" + `Return ONLY the files to write, each as a block. No prose, no JSON, no markdown
+fences around the blocks:
 
-[
-  { "path": "relative/path.go", "content": "<full file contents>" },
-  ...
-]
+=== FILE: relative/path.go ===
+<full file contents, verbatim>
+=== END FILE: relative/path.go ===
+=== FILE: relative/other.go ===
+<full file contents, verbatim>
+=== END FILE: relative/other.go ===
 
 Rules:
+- The content between the markers is copied to disk exactly as written — do NOT
+  escape newlines or quotes, do NOT wrap it in backticks. Just paste the file.
+- The "=== FILE: <path> ===" and "=== END FILE: <path> ===" lines must each be on
+  their own line and name the same path.
 - Full file contents, not diffs. Paths are relative to the repo root.
 - Include everything needed to build and run: source, config, go.mod / package.json, tests.
 - If you create a runnable service, include a multi-stage Dockerfile for it that
   builds and runs cleanly, and a /healthz (or equivalent) endpoint.
 - Do not delete files. Overwrite by providing the same path.
 - Keep it minimal but complete for the assigned tasks.
-- Answer with the JSON array and nothing else. If (and only if) there is genuinely
-  nothing to change, answer with exactly [] — never with prose.`
+- If (and only if) there is genuinely nothing to change, answer with exactly the
+  line: NO CHANGES — never with prose.`
 
 // Executor builds the developer executor for a given role prompt.
 func Executor(client Completer, systemPrompt string) a2asrv.AgentExecutor {
@@ -79,6 +92,10 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 	user := buildPrompt(env, repo.Dir, tree)
 
 	files, out, err := completeFiles(ctx, client, systemPrompt, user, env.Stage)
+	var trunc *truncatedError
+	if errors.As(err, &trunc) {
+		err = nil // usable partial: commit what arrived, note it below
+	}
 	if err != nil {
 		return factory.ResultEnvelope{}, err
 	}
@@ -110,9 +127,13 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 	if err != nil {
 		return factory.ResultEnvelope{}, err
 	}
+	summary := fmt.Sprintf("wrote %d files (%s)", len(written), strings.Join(shortList(written), ", "))
+	if trunc != nil {
+		summary += fmt.Sprintf("; model output cut off before %s — expect a build-gate finding", trunc.lastPath)
+	}
 	return factory.ResultEnvelope{
 		Role:         env.Stage,
-		Summary:      fmt.Sprintf("wrote %d files (%s)", len(written), strings.Join(shortList(written), ", ")),
+		Summary:      summary,
 		CommitSHA:    sha,
 		FilesWritten: written,
 	}, nil
@@ -125,12 +146,18 @@ func runBatched(ctx context.Context, client Completer, systemPrompt string, env 
 	seen := map[string]bool{}
 	var allWritten []string
 	var lastSHA string
+	var truncNote string
 
 	for i, t := range env.Tasks {
 		tree, _ := repo.Tree(ctx)
 		user := buildBatchPrompt(env, repo.Dir, tree, t, taskLabels(env.Tasks[:i]), taskLabels(env.Tasks[i+1:]))
 
 		files, _, err := completeFiles(ctx, client, systemPrompt, user, env.Stage)
+		var trunc *truncatedError
+		if errors.As(err, &trunc) {
+			truncNote = fmt.Sprintf("; task %s cut off before %s — expect a build-gate finding", t.ID, trunc.lastPath)
+			err = nil
+		}
 		if err != nil {
 			return factory.ResultEnvelope{}, err
 		}
@@ -167,8 +194,8 @@ func runBatched(ctx context.Context, client Completer, systemPrompt string, env 
 	sort.Strings(allWritten)
 	return factory.ResultEnvelope{
 		Role: env.Stage,
-		Summary: fmt.Sprintf("%d tasks, wrote %d files (%s)",
-			len(env.Tasks), len(allWritten), strings.Join(shortList(allWritten), ", ")),
+		Summary: fmt.Sprintf("%d tasks, wrote %d files (%s)%s",
+			len(env.Tasks), len(allWritten), strings.Join(shortList(allWritten), ", "), truncNote),
 		CommitSHA:    lastSHA,
 		FilesWritten: allWritten,
 	}, nil
@@ -276,43 +303,83 @@ func existingContent(dir string, tree []string) string {
 
 // retryContract nudges a model that answered in prose back to the wire format.
 const retryContract = `
-Your previous answer was not a JSON array and could not be used.
+Your previous answer was not in the "=== FILE: <path> ===" block format and
+could not be used.
 
-Reply with ONLY the JSON array described above — no prose, no explanation, no
-markdown outside the fenced block. If nothing needs to change, reply with
-exactly: []`
+Reply with ONLY the file blocks described above — no prose, no JSON, no markdown
+fences. If nothing needs to change, reply with exactly the line: NO CHANGES`
+
+// truncatedError marks a model reply that opened a file block but was cut off
+// before closing it. It is not a hard failure: the complete files that arrived
+// before the cut-off are still usable, and the missing one surfaces at the
+// build gate as a normal fix-pass finding.
+type truncatedError struct {
+	stage    string
+	lastPath string
+	n        int
+}
+
+func (e *truncatedError) Error() string {
+	return fmt.Sprintf("devagent(%s): model output cut off before %s (%d complete files kept)",
+		e.stage, e.lastPath, e.n)
+}
 
 // completeFiles asks the model for the file list, retrying once when the reply
-// is not parseable. The models occasionally answer a fix-pass prompt in prose
-// ("the findings are already addressed") instead of the agreed JSON; one strict
-// retry is much cheaper than failing the whole run.
+// is neither the block format, a JSON array, nor the "NO CHANGES" sentinel. The
+// models occasionally answer a fix-pass prompt in prose ("the findings are
+// already addressed"); one strict retry is much cheaper than failing the run.
+//
+// A *truncatedError is returned alongside a non-empty file map when the reply
+// was cut off mid-block — the caller commits what arrived and moves on.
 func completeFiles(ctx context.Context, client Completer, system, user, stage string) (map[string]string, string, error) {
 	out, err := client.Complete(ctx, system, user)
 	if err != nil {
 		return nil, "", err
 	}
-	files, parseErr := factory.ParseFileSpecs(out)
-	if parseErr == nil {
-		return files, out, nil
+	if files, txt, e := interpret(out, stage); files != nil || e != nil {
+		return files, txt, e
 	}
-	log.Printf("devagent(%s): unparseable reply (%d bytes, starts %q) — retrying once",
+	log.Printf("devagent(%s): unusable reply (%d bytes, starts %q) — retrying once",
 		stage, len(out), head(out, 120))
 
 	retry, err := client.Complete(ctx, system, user+"\n\n"+retryContract)
 	if err != nil {
 		return nil, "", err
 	}
-	files, retryErr := factory.ParseFileSpecs(retry)
-	if retryErr == nil {
-		return files, retry, nil
+	if files, txt, e := interpret(retry, stage); files != nil || e != nil {
+		return files, txt, e
 	}
 	if dbg := os.Getenv("ASF_DEBUG_DIR"); dbg != "" {
 		_ = os.WriteFile(filepath.Join(dbg, "devagent-"+stage+"-raw.txt"),
 			[]byte(out+"\n\n===== RETRY =====\n\n"+retry), 0o644)
 	}
 	return nil, retry, fmt.Errorf(
-		"devagent(%s): could not parse file list after a retry (%d bytes, starts %q): %w",
-		stage, len(retry), head(retry, 200), retryErr)
+		"devagent(%s): could not parse file list after a retry (%d bytes, starts %q)",
+		stage, len(retry), head(retry, 200))
+}
+
+// interpret turns one model reply into a file set:
+//   - files != nil, err == nil  -> usable (an empty map means "nothing to do")
+//   - files != nil, err != nil  -> usable partial (*truncatedError)
+//   - files == nil, err == nil  -> unusable; the caller should retry
+func interpret(out, stage string) (map[string]string, string, error) {
+	if blocks, res := factory.ParseFileBlocks(out); res.Count > 0 || res.Truncated {
+		if res.Truncated {
+			return blocks, out, &truncatedError{stage: stage, lastPath: res.LastPath, n: res.Count}
+		}
+		return blocks, out, nil
+	}
+	if isNoChanges(out) {
+		return map[string]string{}, out, nil
+	}
+	if specs, err := factory.ParseFileSpecs(out); err == nil { // legacy JSON array
+		return specs, out, nil
+	}
+	return nil, out, nil
+}
+
+func isNoChanges(s string) bool {
+	return strings.EqualFold(strings.Trim(strings.TrimSpace(s), "`*_ \n\t"), "NO CHANGES")
 }
 
 // findingTag renders the source and rule/category of a finding as " (gosec G404)"

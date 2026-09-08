@@ -61,9 +61,10 @@ func TestRunBatchedOneCommitPerTask(t *testing.T) {
 		},
 	}
 	fc := &fakeCompleter{replies: []string{
-		`[{"path":"go.mod","content":"module quotes\n\ngo 1.22\n"}]`,
+		"=== FILE: go.mod ===\nmodule quotes\n\ngo 1.22\n=== END FILE: go.mod ===\n",
+		// one legacy JSON reply among the blocks — the fallback must still parse it
 		`[{"path":"quotes.go","content":"package main\n\nfunc quotes() {}\n"}]`,
-		`[{"path":"health.go","content":"package main\n\nfunc health() {}\n"}]`,
+		"=== FILE: health.go ===\npackage main\n\nfunc health() {}\n=== END FILE: health.go ===\n",
 	}}
 
 	res, err := runBatched(ctx, fc, "sys", env, repo)
@@ -120,9 +121,9 @@ func TestRunBatchedSkipsEmptyTaskButCommitsRest(t *testing.T) {
 		},
 	}
 	fc := &fakeCompleter{replies: []string{
-		`[{"path":"a.go","content":"package main\n"}]`,
-		`[]`,
-		`[{"path":"c.go","content":"package main\n"}]`,
+		"=== FILE: a.go ===\npackage main\n=== END FILE: a.go ===\n",
+		"NO CHANGES",
+		"=== FILE: c.go ===\npackage main\n=== END FILE: c.go ===\n",
 	}}
 
 	res, err := runBatched(ctx, fc, "sys", env, repo)
@@ -145,7 +146,7 @@ func TestRunBatchedAllEmptyIsAnError(t *testing.T) {
 		Stage: factory.RoleBackendDeveloper,
 		Tasks: []factory.PlanTask{{ID: "T1", Title: "one"}, {ID: "T2", Title: "two"}},
 	}
-	fc := &fakeCompleter{replies: []string{`[]`, `[]`}}
+	fc := &fakeCompleter{replies: []string{`NO CHANGES`, `[]`}}
 
 	if _, err := runBatched(ctx, fc, "sys", env, repo); err == nil {
 		t.Fatal("expected an error when every task produced no files")
@@ -161,7 +162,8 @@ func TestRunOnceSingleCommit(t *testing.T) {
 		Tasks: []factory.PlanTask{{ID: "T1", Title: "do it all"}},
 	}
 	fc := &fakeCompleter{replies: []string{
-		`[{"path":"main.go","content":"package main\n"},{"path":"go.mod","content":"module x\n"}]`,
+		"=== FILE: main.go ===\npackage main\n=== END FILE: main.go ===\n" +
+			"=== FILE: go.mod ===\nmodule x\n=== END FILE: go.mod ===\n",
 	}}
 
 	res, err := runOnce(ctx, fc, "sys", env, repo)
@@ -202,7 +204,7 @@ func TestExecutorFixPassIsSingleCall(t *testing.T) {
 		Tasks: []factory.PlanTask{{ID: "T1", Title: "one"}, {ID: "T2", Title: "two"}},
 	}
 	fc := &fakeCompleter{replies: []string{
-		`[{"path":"main.go","content":"package main // #nosec G404 -- deliberate\n"}]`,
+		"=== FILE: main.go ===\npackage main // #nosec G404 -- deliberate\n=== END FILE: main.go ===\n",
 	}}
 
 	got, err := run(ctx, fc, "sys", env)
@@ -217,5 +219,39 @@ func TestExecutorFixPassIsSingleCall(t *testing.T) {
 	}
 	if got.CommitSHA == "" {
 		t.Fatal("CommitSHA empty")
+	}
+}
+
+// A reply cut off mid-block still commits the files that fully arrived; the
+// missing one is left for the build gate to catch.
+func TestRunOnceTruncatedCommitsCompleteFiles(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleBackendDeveloper,
+		Tasks: []factory.PlanTask{{ID: "T1", Title: "everything"}},
+	}
+	fc := &fakeCompleter{replies: []string{
+		"=== FILE: main.go ===\npackage main\n=== END FILE: main.go ===\n" +
+			"=== FILE: go.mod ===\nmodule x\n=== END FILE: go.mod ===\n" +
+			"=== FILE: store.go ===\npackage main\n// cut off before the closing marker",
+	}}
+
+	res, err := runOnce(ctx, fc, "sys", env, repo)
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if len(fc.calls) != 1 {
+		t.Fatalf("model calls = %d, want 1 (no retry on a usable partial)", len(fc.calls))
+	}
+	if got := strings.Join(res.FilesWritten, ","); got != "go.mod,main.go" {
+		t.Fatalf("FilesWritten = %q, want the two complete files", got)
+	}
+	if !strings.Contains(res.Summary, "cut off before store.go") {
+		t.Fatalf("Summary should flag the truncation: %q", res.Summary)
+	}
+	if subs := commitSubjects(t, repo.Dir); len(subs) != 2 {
+		t.Fatalf("commits = %v, want 1 task commit + base", subs)
 	}
 }

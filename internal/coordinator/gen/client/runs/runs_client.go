@@ -61,6 +61,12 @@ type ClientService interface {
 	// ApproveRunContext approve the plan and resume a run paused at the approval gate.
 	ApproveRunContext(ctx context.Context, params *ApproveRunParams, opts ...ClientOption) (*ApproveRunOK, error)
 
+	// DeleteRun delete a terminal run and its workspace.
+	DeleteRun(params *DeleteRunParams, opts ...ClientOption) (*DeleteRunNoContent, error)
+
+	// DeleteRunContext delete a terminal run and its workspace.
+	DeleteRunContext(ctx context.Context, params *DeleteRunParams, opts ...ClientOption) (*DeleteRunNoContent, error)
+
 	// GetRun get one run.
 	GetRun(params *GetRunParams, opts ...ClientOption) (*GetRunOK, error)
 
@@ -79,10 +85,10 @@ type ClientService interface {
 	// RejectRunContext reject the plan replan with feedback or abandon the run.
 	RejectRunContext(ctx context.Context, params *RejectRunParams, opts ...ClientOption) (*RejectRunOK, error)
 
-	// ResumeRun restart a run parked in needs human review granting fresh budget.
+	// ResumeRun restart a run parked in needs human review or failed.
 	ResumeRun(params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error)
 
-	// ResumeRunContext restart a run parked in needs human review granting fresh budget.
+	// ResumeRunContext restart a run parked in needs human review or failed.
 	ResumeRunContext(ctx context.Context, params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error)
 
 	// ReviewRun human verdict on a finished run accept it or send it back with comments.
@@ -157,6 +163,67 @@ func (a *Client) ApproveRunContext(ctx context.Context, params *ApproveRunParams
 	//
 	// a default response is provided: fill this and return an error
 	unexpectedSuccess := result.(*ApproveRunDefault)
+
+	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// DeleteRun deletes a terminal run and its workspace.
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.DeleteRunContext] instead.
+func (a *Client) DeleteRun(params *DeleteRunParams, opts ...ClientOption) (*DeleteRunNoContent, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.DeleteRunContext(ctx, params, opts...)
+}
+
+// DeleteRunContext deletes a terminal run and its workspace.
+//
+// Do not use the deprecated [DeleteRunParams.Context] with this method: it would be ignored.
+func (a *Client) DeleteRunContext(ctx context.Context, params *DeleteRunParams, opts ...ClientOption) (*DeleteRunNoContent, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewDeleteRunParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "deleteRun",
+		Method:             "DELETE",
+		PathPattern:        "/v1/runs/{id}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &DeleteRunReader{formats: a.formats},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*DeleteRunNoContent)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+	//
+	// a default response is provided: fill this and return an error
+	unexpectedSuccess := result.(*DeleteRunDefault)
 
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
 }
@@ -344,7 +411,10 @@ func (a *Client) RejectRunContext(ctx context.Context, params *RejectRunParams, 
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
 }
 
-// ResumeRun restarts a run parked in needs human review granting fresh budget.
+// ResumeRun restarts a run parked in needs human review or failed.
+//
+// Grants fresh budget and re-dispatches. With "comment" the note is recorded as a high-severity finding and routed to the responsible developer for a fix pass. With "accept" the run's branch is taken as-is (pushed / PR opened) and the run stops. With "abandon" the run is failed.
+// .
 //
 // This method does not support injected context.
 // However, timeout and opentracing contexts are honored whenever enabled.
@@ -361,7 +431,10 @@ func (a *Client) ResumeRun(params *ResumeRunParams, opts ...ClientOption) (*Resu
 	return a.ResumeRunContext(ctx, params, opts...)
 }
 
-// ResumeRunContext restarts a run parked in needs human review granting fresh budget.
+// ResumeRunContext restarts a run parked in needs human review or failed.
+//
+// Grants fresh budget and re-dispatches. With "comment" the note is recorded as a high-severity finding and routed to the responsible developer for a fix pass. With "accept" the run's branch is taken as-is (pushed / PR opened) and the run stops. With "abandon" the run is failed.
+// .
 //
 // Do not use the deprecated [ResumeRunParams.Context] with this method: it would be ignored.
 func (a *Client) ResumeRunContext(ctx context.Context, params *ResumeRunParams, opts ...ClientOption) (*ResumeRunOK, error) {
@@ -407,7 +480,7 @@ func (a *Client) ResumeRunContext(ctx context.Context, params *ResumeRunParams, 
 
 // ReviewRun humen verdict on a finished run accept it or send it back with comments.
 //
-// Valid from status pr_ready or pr_open. "accept" is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
+// Valid from status pr_ready or pr_open. "accept" (re-)pushes the work branch to origin, opens the PR when the remote is GitHub and a token is set, and is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
 // .
 //
 // This method does not support injected context.
@@ -427,7 +500,7 @@ func (a *Client) ReviewRun(params *ReviewRunParams, opts ...ClientOption) (*Revi
 
 // ReviewRunContext humen verdict on a finished run accept it or send it back with comments.
 //
-// Valid from status pr_ready or pr_open. "accept" is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
+// Valid from status pr_ready or pr_open. "accept" (re-)pushes the work branch to origin, opens the PR when the remote is GitHub and a token is set, and is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
 // .
 //
 // Do not use the deprecated [ReviewRunParams.Context] with this method: it would be ignored.

@@ -30,7 +30,7 @@ func NewReviewRun(ctx *middleware.Context, handler ReviewRunHandler) *ReviewRun 
 //
 // # Human verdict on a finished run — accept it, or send it back with comments
 //
-// Valid from status pr_ready or pr_open. "accept" is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
+// Valid from status pr_ready or pr_open. "accept" (re-)pushes the work branch to origin, opens the PR when the remote is GitHub and a token is set, and is terminal. With "request_changes" every comment becomes a Finding{source:"human"} and the run re-enters the factory at the responsible developer.
 type ReviewRun struct {
 	Context *middleware.Context
 	Handler ReviewRunHandler

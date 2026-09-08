@@ -2,11 +2,17 @@ package coordinator
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nzin/ai-software-factory/internal/factory"
 	"github.com/nzin/ai-software-factory/internal/prd"
+	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
 // --- helpers ---
@@ -120,6 +126,40 @@ func TestRejectAbandons(t *testing.T) {
 	}
 	if got.Status != StatusFailed {
 		t.Fatalf("status = %s, want failed", got.Status)
+	}
+}
+
+func TestRejectWithFeedbackRevisesPlan(t *testing.T) {
+	o := New(nil, WithEngine(gatedThenApprove{}), WithWorkspace(nil))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X", Description: "orig"}, SubmitOptions{})
+	paused := waitStatus(t, o, run.ID, StatusAwaitingApproval)
+	if paused.Plan == "" {
+		t.Fatal("no plan to revise")
+	}
+
+	got, err := o.Reject(run.ID, "add rate limiting to the API", false)
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if got.PlanFeedback != "add rate limiting to the API" {
+		t.Fatalf("PlanFeedback = %q", got.PlanFeedback)
+	}
+	if got.Plan == "" {
+		t.Fatal("previous plan was wiped — the planner has no revision context")
+	}
+	if got.PlanTasks != nil {
+		t.Fatalf("PlanTasks not cleared: %+v", got.PlanTasks)
+	}
+	if got.Stage != "planner" || got.Status != StatusRunning {
+		t.Fatalf("stage=%q status=%q, want planner/running", got.Stage, got.Status)
+	}
+	if got.PRD.Description != "orig" {
+		t.Fatalf("PRD description was polluted with feedback: %q", got.PRD.Description)
+	}
+	// The planner reruns and re-pauses; PlanFeedback is consumed by applyPlan.
+	revised := waitStatus(t, o, run.ID, StatusAwaitingApproval)
+	if revised.PlanFeedback != "" {
+		t.Fatalf("PlanFeedback not consumed after replan: %q", revised.PlanFeedback)
 	}
 }
 
@@ -526,7 +566,7 @@ func TestResumeRestartsAtLastStage(t *testing.T) {
 	}
 	budgetBefore := parked.Budget.IterationsRemaining
 
-	resumed, err := o.Resume(run.ID, ResumeOptions{IterationBudget: 7})
+	resumed, err := o.Resume(context.Background(), run.ID, ResumeOptions{IterationBudget: 7})
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -549,7 +589,7 @@ func TestResumeAbandons(t *testing.T) {
 	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
 	waitStatus(t, o, run.ID, StatusNeedsHumanReview)
 
-	got, err := o.Resume(run.ID, ResumeOptions{Abandon: true})
+	got, err := o.Resume(context.Background(), run.ID, ResumeOptions{Abandon: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,11 +603,121 @@ func TestResumeRejectsWrongStatus(t *testing.T) {
 	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
 	waitTerminal(t, o, run.ID) // ends in `done`, not needs_human_review
 
-	if _, err := o.Resume(run.ID, ResumeOptions{}); err == nil {
+	if _, err := o.Resume(context.Background(), run.ID, ResumeOptions{}); err == nil {
 		t.Fatal("resume from a done run should fail")
 	}
-	if _, err := o.Resume("nope", ResumeOptions{}); err == nil {
+	if _, err := o.Resume(context.Background(), "nope", ResumeOptions{}); err == nil {
 		t.Fatal("resume of an unknown run should fail")
+	}
+}
+
+// failsOnBackend: planner emits a plan, then the backend stage errors — driving
+// the run to `failed`.
+type failsOnBackend struct{}
+
+func (failsOnBackend) Run(_ context.Context, run *Run) (StageResult, error) {
+	if run.Stage == "planner" {
+		return StageResult{
+			Task: Task{Role: "planner", State: "completed", Output: "# Plan"},
+			Plan: backendPlan(),
+		}, nil
+	}
+	if run.Stage == factory.RoleBackendDeveloper {
+		return StageResult{}, errors.New("boom: model reply truncated")
+	}
+	return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+}
+
+func TestResumeFailedRunWithComment(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil), WithDefaults(100, time.Hour))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	failed := waitTerminal(t, o, run.ID)
+	if failed.Status != StatusFailed {
+		t.Fatalf("status = %s, want failed", failed.Status)
+	}
+
+	resumed, err := o.Resume(context.Background(), run.ID,
+		ResumeOptions{Comment: "the gosec G404 is a false positive — add // #nosec"})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	var human *Finding
+	for i := range resumed.Findings {
+		if resumed.Findings[i].Source == "human" {
+			human = &resumed.Findings[i]
+		}
+	}
+	if human == nil || human.Title != "the gosec G404 is a false positive — add // #nosec" {
+		t.Fatalf("human finding not recorded: %+v", resumed.Findings)
+	}
+	if human.Severity != "high" {
+		t.Fatalf("human finding severity = %q, want high", human.Severity)
+	}
+	if resumed.Attempts[factory.RoleBackendDeveloper] != 1 {
+		t.Fatalf("attempts[backend] = %d, want 1", resumed.Attempts[factory.RoleBackendDeveloper])
+	}
+	var ev *Event
+	for i := range resumed.Events {
+		if resumed.Events[i].Kind == EventResumed {
+			ev = &resumed.Events[i]
+		}
+	}
+	if ev == nil || ev.Actor != ActorHuman {
+		t.Fatalf("resumed event missing or not by human: %+v", ev)
+	}
+	waitTerminal(t, o, run.ID) // let the goroutine settle (it will fail again)
+}
+
+func TestResumeAcceptAsIs(t *testing.T) {
+	o := New(nil, WithEngine(&alwaysRequestChanges{}), WithWorkspace(nil),
+		WithMaxStageIterations(1), WithDefaults(100, time.Hour))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	waitStatus(t, o, run.ID, StatusNeedsHumanReview)
+
+	got, err := o.Resume(context.Background(), run.ID, ResumeOptions{Accept: true})
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	// With a nil workspace finish() short-circuits to done.
+	if !got.Status.Terminal() || got.Status == StatusNeedsHumanReview {
+		t.Fatalf("status = %s, want a fresh terminal state", got.Status)
+	}
+	if !hasKind(got, EventReviewAccepted) {
+		t.Fatalf("no review_accepted event: %v", kinds(got))
+	}
+}
+
+func TestDeleteRun(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil), WithDefaults(100, time.Hour))
+	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if s := waitTerminal(t, o, run.ID).Status; s != StatusFailed {
+		t.Fatalf("status = %s, want failed", s)
+	}
+
+	if err := o.Delete(context.Background(), run.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := o.Get(run.ID); ok {
+		t.Fatal("run still present after delete")
+	}
+	all, _ := o.store.All()
+	if len(all) != 0 {
+		t.Fatalf("store not empty: %+v", all)
+	}
+	if err := o.Delete(context.Background(), run.ID); err == nil {
+		t.Fatal("deleting a missing run should error")
+	}
+}
+
+func TestDeleteRunRejectsNonTerminal(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil))
+	o.store.Put(&Run{ID: "r1", Status: StatusRunning})
+	if err := o.Delete(context.Background(), "r1"); err == nil {
+		t.Fatal("expected an error deleting a running run")
+	}
+	if _, ok := o.Get("r1"); !ok {
+		t.Fatal("run must survive a rejected delete")
 	}
 }
 
@@ -604,7 +754,7 @@ func TestReviewAcceptIsTerminal(t *testing.T) {
 	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
 	driveToPRReady(t, o, run.ID)
 
-	got, err := o.Review(run.ID, ReviewAccept, nil)
+	got, err := o.Review(context.Background(), run.ID, ReviewAccept, nil)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
@@ -619,6 +769,101 @@ func TestReviewAcceptIsTerminal(t *testing.T) {
 	}
 }
 
+// testGit runs git in dir and fails the test on error.
+func testGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return string(out)
+}
+
+// gitOriginFixture builds a real local repo (one commit on main) to clone from.
+func gitOriginFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	testGit(t, dir, "init", "-q", "-b", "main")
+	testGit(t, dir, "config", "user.name", "Fixture")
+	testGit(t, dir, "config", "user.email", "fixture@test.local")
+	testGit(t, dir, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, dir, "add", "-A")
+	testGit(t, dir, "commit", "-q", "-m", "base")
+	return dir
+}
+
+// committingEngine approves every stage and writes+commits a file on the
+// developer stage, so the run reaches finish() with real commits on its branch.
+type committingEngine struct{}
+
+func (committingEngine) Run(ctx context.Context, run *Run) (StageResult, error) {
+	if run.Stage == "planner" {
+		return StageResult{Task: Task{Role: "planner", State: "completed", Output: "plan"}, Plan: backendPlan()}, nil
+	}
+	if factory.IsDeveloperRole(run.Stage) {
+		repo, err := workspace.Open(ctx, run.WorkspaceDir)
+		if err != nil {
+			return StageResult{}, err
+		}
+		if _, err := repo.WriteFiles(map[string]string{"main.go": "package main\n"}); err != nil {
+			return StageResult{}, err
+		}
+		if _, err := repo.Commit(ctx, run.Stage, "implement the thing"); err != nil {
+			return StageResult{}, err
+		}
+	}
+	return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+}
+
+// A run whose earlier push failed (origin was unreachable) sits at pr_ready with
+// its branch missing from origin. Accepting it must (re-)push the branch.
+func TestReviewAcceptPushesTheBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	src := gitOriginFixture(t)
+	o := New(nil, WithEngine(committingEngine{}), WithWorkspace(workspace.NewManager(t.TempDir())),
+		WithDefaults(100, time.Hour))
+
+	run, err := o.Submit(ctx, prd.PRD{Title: "X"}, SubmitOptions{RepoURL: "file://" + src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := waitStatus(t, o, run.ID, StatusPRReady)
+	branch := got.WorkBranch
+	if branch == "" {
+		t.Fatal("run has no work branch")
+	}
+
+	// finish() already pushed once; drop the branch from origin to model a push
+	// that had failed, then confirm accept puts it back.
+	testGit(t, src, "branch", "-D", branch)
+	if out := testGit(t, src, "branch", "--list", branch); strings.Contains(out, branch) {
+		t.Fatalf("branch not removed from origin: %q", out)
+	}
+
+	accepted, err := o.Review(ctx, run.ID, ReviewAccept, nil)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if accepted.Status != StatusAccepted {
+		t.Fatalf("status = %s, want accepted", accepted.Status)
+	}
+	if !hasKind(accepted, EventPushed) {
+		t.Fatalf("no pushed event on accept: %v", kinds(accepted))
+	}
+	if out := testGit(t, src, "branch", "--list", branch); !strings.Contains(out, branch) {
+		t.Fatalf("branch %s not pushed to origin on accept: %q", branch, out)
+	}
+}
+
 func TestReviewRequestChangesReentersTheFactory(t *testing.T) {
 	eng := &prReady{}
 	o := New(nil, WithEngine(eng), WithWorkspace(nil))
@@ -626,7 +871,7 @@ func TestReviewRequestChangesReentersTheFactory(t *testing.T) {
 	driveToPRReady(t, o, run.ID)
 	callsBefore := eng.calls
 
-	got, err := o.Review(run.ID, ReviewRequestChanges, []ReviewComment{
+	got, err := o.Review(context.Background(), run.ID, ReviewRequestChanges, []ReviewComment{
 		{Note: "the roll endpoint accepts 0 dice", File: "internal/api/handlers.go", Line: 42},
 	})
 	if err != nil {
@@ -670,10 +915,10 @@ func TestReviewRequestChangesNeedsAComment(t *testing.T) {
 	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
 	driveToPRReady(t, o, run.ID)
 
-	if _, err := o.Review(run.ID, ReviewRequestChanges, nil); err == nil {
+	if _, err := o.Review(context.Background(), run.ID, ReviewRequestChanges, nil); err == nil {
 		t.Fatal("request_changes with no comments should fail")
 	}
-	if _, err := o.Review(run.ID, ReviewRequestChanges, []ReviewComment{{Note: "   "}}); err == nil {
+	if _, err := o.Review(context.Background(), run.ID, ReviewRequestChanges, []ReviewComment{{Note: "   "}}); err == nil {
 		t.Fatal("request_changes with a blank comment should fail")
 	}
 }
@@ -683,11 +928,11 @@ func TestReviewRejectsWrongStatusAndDecision(t *testing.T) {
 	run, _ := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
 	waitTerminal(t, o, run.ID) // `done`, not pr_ready
 
-	if _, err := o.Review(run.ID, ReviewAccept, nil); err == nil {
+	if _, err := o.Review(context.Background(), run.ID, ReviewAccept, nil); err == nil {
 		t.Fatal("review of a done run should fail")
 	}
 	driveToPRReady(t, o, run.ID)
-	if _, err := o.Review(run.ID, "maybe", nil); err == nil {
+	if _, err := o.Review(context.Background(), run.ID, "maybe", nil); err == nil {
 		t.Fatal("an unknown decision should fail")
 	}
 }
@@ -699,11 +944,11 @@ func TestReviewCapsRepeatedRejections(t *testing.T) {
 	comment := []ReviewComment{{Note: "still wrong", TargetRole: factory.RoleBackendDeveloper}}
 
 	driveToPRReady(t, o, run.ID)
-	if _, err := o.Review(run.ID, ReviewRequestChanges, comment); err != nil {
+	if _, err := o.Review(context.Background(), run.ID, ReviewRequestChanges, comment); err != nil {
 		t.Fatal(err)
 	}
 	driveToPRReady(t, o, run.ID)
-	got, err := o.Review(run.ID, ReviewRequestChanges, comment)
+	got, err := o.Review(context.Background(), run.ID, ReviewRequestChanges, comment)
 	if err != nil {
 		t.Fatal(err)
 	}

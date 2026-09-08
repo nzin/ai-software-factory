@@ -18,6 +18,31 @@ func TestParseMarkdown(t *testing.T) {
 	}
 }
 
+func TestParseMarkdownNoH1(t *testing.T) {
+	src := "## Background\n\nLet's build a game.\n\n## Requirements\n\n- one\n- two\n"
+	p, err := ParseMarkdown(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Title != untitled {
+		t.Fatalf("title = %q, want %q", p.Title, untitled)
+	}
+	if !strings.Contains(p.Description, "## Background") || !strings.Contains(p.Description, "## Requirements") {
+		t.Fatalf("description dropped headings: %q", p.Description)
+	}
+	if strings.Contains(p.Text(), "# ##") {
+		t.Fatalf("Text() double-prefixed a heading:\n%s", p.Text())
+	}
+}
+
+func TestTextDoesNotDoublePrefixHeadingTitle(t *testing.T) {
+	// A run persisted before the ParseMarkdown fix still has a "## …" title.
+	got := PRD{Title: "## Background", Description: "d"}.Text()
+	if strings.HasPrefix(got, "# #") {
+		t.Fatalf("Text() double-prefixed: %q", got)
+	}
+}
+
 func TestParseJSON(t *testing.T) {
 	p, err := ParseJSON([]byte(`{"title":"X","description":"d","acceptanceCriteria":["a","b"]}`))
 	if err != nil {

@@ -11,6 +11,7 @@ type Store interface {
 	Put(r *Run) error
 	Get(id string) (*Run, bool, error)
 	All() ([]*Run, error)
+	Delete(id string) error
 }
 
 // memStore is the default in-memory Store.
@@ -54,6 +55,13 @@ func (s *memStore) Get(id string) (*Run, bool, error) {
 		return nil, false, nil
 	}
 	return snapshot(r), true, nil
+}
+
+func (s *memStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.runs, id)
+	return nil
 }
 
 func (s *memStore) All() ([]*Run, error) {

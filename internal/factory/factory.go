@@ -4,6 +4,7 @@ package factory
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -144,6 +145,26 @@ func RouteRole(findings []Finding, lastDev string) string {
 		return lastDev
 	}
 	return RoleBackendDeveloper
+}
+
+// RoleForPath maps a repo-relative file path to the developer role that owns it,
+// or "" when it is not a code file any single developer owns. Used to give an
+// owner to findings that a tool (gosec, govulncheck, npm audit, the build gate)
+// reports without one.
+func RoleForPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return RoleBackendDeveloper
+	case ".vue", ".ts", ".tsx", ".jsx", ".css", ".scss":
+		return RoleFrontendDev
+	}
+	if strings.HasSuffix(path, "go.mod") || strings.HasSuffix(path, "go.sum") {
+		return RoleBackendDeveloper
+	}
+	if strings.HasSuffix(path, "package.json") {
+		return RoleFrontendDev
+	}
+	return ""
 }
 
 // VerdictFor derives a reviewer verdict from finding severities: request_changes
@@ -309,6 +330,67 @@ func ParseFileSpecs(llmOutput string) (map[string]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// BlockResult reports what ParseFileBlocks saw beyond the files themselves.
+type BlockResult struct {
+	Count     int    // complete "=== FILE: … ===" blocks parsed
+	Truncated bool   // a block was opened but EOF arrived before its close
+	LastPath  string // path of the unterminated block, when Truncated
+}
+
+const (
+	fileBlockOpenPrefix  = "=== FILE: "
+	fileBlockClosePrefix = "=== END FILE: "
+	fileBlockSuffix      = " ==="
+)
+
+// ParseFileBlocks reads an escaping-free file list:
+//
+//	=== FILE: relative/path ===
+//	<verbatim content>
+//	=== END FILE: relative/path ===
+//
+// Content between the markers is taken literally — no JSON string escaping, so a
+// model can never corrupt it with an unescaped newline or quote. Lines outside
+// any block are ignored. When a block is opened but EOF arrives before its
+// matching close, BlockResult.Truncated is set and the files that did complete
+// are still returned. With no "=== FILE: " marker at all it returns
+// (nil, &BlockResult{}) so the caller can fall back to ParseFileSpecs.
+func ParseFileBlocks(s string) (map[string]string, *BlockResult) {
+	res := &BlockResult{}
+	files := map[string]string{}
+	var (
+		inBlock bool
+		curPath string
+		curBody []string
+	)
+	for _, line := range strings.Split(s, "\n") {
+		marker := strings.TrimRight(line, " \t\r")
+		switch {
+		case !inBlock && strings.HasPrefix(marker, fileBlockOpenPrefix) && strings.HasSuffix(marker, fileBlockSuffix):
+			curPath = strings.TrimSpace(marker[len(fileBlockOpenPrefix) : len(marker)-len(fileBlockSuffix)])
+			curBody = curBody[:0]
+			inBlock = curPath != ""
+		case inBlock && marker == fileBlockClosePrefix+curPath+fileBlockSuffix:
+			body := strings.Join(curBody, "\n")
+			if body != "" {
+				body += "\n"
+			}
+			files[curPath] = body
+			res.Count++
+			inBlock, curPath = false, ""
+		case inBlock:
+			curBody = append(curBody, line)
+		}
+	}
+	if inBlock {
+		res.Truncated, res.LastPath = true, curPath
+	}
+	if res.Count == 0 && !res.Truncated {
+		return nil, res
+	}
+	return files, res
 }
 
 // ParseFindings pulls a JSON array of Finding out of an LLM response.

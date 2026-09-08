@@ -87,6 +87,10 @@ func (s *store) Get(id string) (*coordinator.Run, bool, error) {
 	return decode(row.Doc)
 }
 
+func (s *store) Delete(id string) error {
+	return s.db.Delete(&runRow{}, "id = ?", id).Error
+}
+
 func (s *store) All() ([]*coordinator.Run, error) {
 	var rows []runRow
 	if err := s.db.Order("created_at desc").Find(&rows).Error; err != nil {

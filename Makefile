@@ -15,7 +15,7 @@ KODUS_DIR := .kodus
 
 UI_DIR := browser/asf-ui
 
-.PHONY: all gen build build_ui run_ui test test_ui vet demo tools clean up down logs compose-build local-git reset-workspace kodus-up kodus-down
+.PHONY: all gen build build_ui run_ui test test_ui vet demo tools clean up down logs compose-build local-git reset-workspace kodus-up kodus-down kodus-bootstrap
 
 all: gen build_ui build test
 
@@ -108,8 +108,8 @@ reset-workspace:
 logs:
 	@docker compose logs -f --tail=100
 
-## kodus-up: clone kodus-installer and start the self-hosted Kodus stack.
-## Then follow scripts/kodus-setup.md to get KODUS_TEAM_KEY into .env.
+## kodus-up: clone kodus-installer, start the self-hosted Kodus stack, then run
+## the headless bootstrap (kodus-bootstrap) to write KODUS_TEAM_KEY into .env.
 kodus-up:
 	@test -d $(KODUS_DIR) || git clone --depth 1 https://github.com/kodustech/kodus-installer $(KODUS_DIR)
 	@if [ ! -f $(KODUS_DIR)/.env ]; then \
@@ -124,7 +124,13 @@ kodus-up:
 	@for n in shared-network monitoring-network kodus-backend-services; do docker network create $$n 2>/dev/null || true; done
 	@cd $(KODUS_DIR) && docker compose up -d
 	@echo "Kodus API: http://localhost:3001   web: http://localhost:3000"
-	@echo "Next: scripts/kodus-setup.md (create an org, set the LLM key, mint KODUS_TEAM_KEY)"
+	@$(MAKE) --no-print-directory kodus-bootstrap
+
+## kodus-bootstrap: create the first org/user via the Kodus API, inject the
+## Anthropic key as a BYOK provider, and write KODUS_TEAM_KEY into .env.
+## No web login required. Safe to re-run.
+kodus-bootstrap:
+	@bash scripts/kodus-bootstrap.sh
 
 kodus-down:
 	@cd $(KODUS_DIR) && docker compose down

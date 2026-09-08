@@ -172,22 +172,6 @@ func TestCheckNoComposeCheckForALibrary(t *testing.T) {
 	}
 }
 
-func TestRouteByPath(t *testing.T) {
-	cases := map[string]string{
-		"internal/api/handlers.go": factory.RoleBackendDeveloper,
-		"go.mod":                   factory.RoleBackendDeveloper,
-		"src/App.vue":              factory.RoleFrontendDev,
-		"src/main.ts":              factory.RoleFrontendDev,
-		"package.json":             factory.RoleFrontendDev,
-		"README.md":                "",
-	}
-	for path, want := range cases {
-		if got := routeByPath(path); got != want {
-			t.Errorf("routeByPath(%q) = %q, want %q", path, got, want)
-		}
-	}
-}
-
 func TestIsCodeChange(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -207,4 +191,3 @@ func TestIsCodeChange(t *testing.T) {
 		}
 	}
 }
-

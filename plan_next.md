@@ -61,7 +61,8 @@
     coordinator read through to the catalog (`agentkit.ListAgents` /
     `GetAgentDetail`), so the browser stays same-origin and no CORS is needed.
   - **`resumeRun`** (`POST /v1/runs/{id}/resume`) un-sticks `needs_human_review`
-    with fresh budget and reset attempt counters; **`reviewRun`**
+    with fresh budget and reset attempt counters (Phase 6.2 extends it to
+    `failed` runs + a routed human `comment` + `accept`); **`reviewRun`**
     (`POST /v1/runs/{id}/review`) closes the Phase-5 human loop: accept →
     `accepted`; request changes → each comment becomes
     `Finding{source:"human"}` and the run re-enters the factory.
@@ -157,13 +158,67 @@
   - Planner prompt asks for coherent, self-contained tasks (≈ one file or one
     endpoint + wiring) and no longer counts task volume toward the approval gate.
 
+- **Phase 6.2 (done)** — human steering of stuck runs. `POST /v1/runs/{id}/resume`
+  now also accepts a `failed` run (not just `needs_human_review`), and takes:
+  - `comment` — recorded as a `Finding{source:"human", severity:"high"}`, routed
+    via `factory.RouteRole` to the responsible developer with `Attempts[role]=1`
+    so it lands in the devagent `# Fix pass` block (the `Review` request_changes
+    mechanism, reused). A planner-stage failure with no plan yet instead appends
+    the note to the PRD and replans.
+  - `accept` — run `finish()` on the current branch (push / open PR) and stop,
+    skipping the rest of the pipeline; requires commits.
+  - `targetRole` — optional routing hint for the comment.
+  RunDetail.vue gains a comment box + "Accept as-is" button, and shows the
+  resume/restart actions for `failed` runs.
+
+- **Phase 6.3 (done)** — "Request changes" at the plan-approval gate. The gate now
+  offers three actions instead of a Reject dialog with a hidden abandon checkbox:
+  **Approve** / **Request changes…** (comments → the planner **revises** its
+  previous plan) / **Reject** (abandon). `Reject(feedback, abandon=false)` stores
+  the note on a transient `Run.PlanFeedback` (no longer polluting
+  `PRD.Description`) and keeps `run.Plan`; `pipeline.plannerInput` folds the
+  previous plan + the feedback into the next planner prompt; `applyPlan` clears
+  `PlanFeedback` once consumed. No swagger change (`RejectRequest` already had
+  `feedback`/`abandon`).
+
+- **Phase 6.4 (done)** — escaping-free file transport for the developer agents.
+  The developers / test-engineer no longer return files as a JSON array of
+  `{path, content}` (the model kept corrupting large `content` strings with
+  unescaped newlines/quotes — `invalid character '\n' in string literal`).
+  They now emit each file as a verbatim block (`=== FILE: <path> ===` …
+  `=== END FILE: <path> ===`, `factory.ParseFileBlocks`); a legacy JSON array
+  and a bare `NO CHANGES` are still accepted (`devagent.interpret`). An
+  unterminated final block is a *detected* truncation: `runOnce` / `runBatched`
+  commit the files that fully arrived and note it in the summary, and the
+  missing file surfaces at the build gate as a normal fix-pass finding — no
+  re-prompting to stitch a cut-off reply.
+
+- **Phase 6.5 (done)** — SAST findings get a path-based owner + dev-only npm noise
+  dropped. `gosec` / `govulncheck` / `npm-audit` findings now carry a
+  `TargetRole` derived from their file path (`factory.RoleForPath`, promoted from
+  the build gate's `routeByPath` and shared with it): `frontend/**` /
+  `package.json` → frontend-developer, Go files → backend-developer. Fixes the
+  loop where a `critical` frontend `npm audit` finding was routed to
+  backend-developer (who can't fix it) until the attempt cap. `npm audit` also
+  runs with `--omit=dev` so devDependency advisories (vite / vitest / esbuild —
+  never shipped) are not reported at all. The UI Findings "Owner" column is now
+  populated for tool findings.
+
+- **Phase 6.6 (done)** — delete a run. `DELETE /v1/runs/{id}`
+  (`Orchestrator.Delete` → new `Store.Delete` on both the mem and GORM stores +
+  `workspace.Manager.Remove`) removes a run in a terminal state; refuses one
+  still queued/running/awaiting_approval or with a live drive goroutine (409).
+  RunDetail shows a **Delete** button when the run is `failed` (redirects to the
+  board on success). No automatic run expiry — `pruneKeep` still bounds only the
+  on-disk workspaces.
+
 ### Known limitations still open
 
 - **Oversized single task.** Batching bounds each call to one task, but a single
-  task that itself spans many files can still truncate; `llm.CompleteStream`
-  returns the partial text with a `nil` error (`stop_reason == max_tokens`) and
-  `ExtractJSON` cannot tell truncated from absent. Follow-up: a typed truncation
-  error + salvage the complete leading elements of a cut-off array.
+  task that itself spans many files can still truncate. This is now *detected*
+  (`ParseFileBlocks` → `BlockResult.Truncated`) and the complete files are kept,
+  but the cut-off file still needs a fix pass to land. Follow-up: split such a
+  task, or stream files as they close instead of buffering the whole reply.
 - **`govulncheck` noise.** Findings are real stdlib CVEs reachable from generated
   code but not caused by it — consider down-ranking stdlib-only traces to `info`.
 
@@ -196,5 +251,6 @@
 - [ ] Kodus self-hosted on the same compose network with a real TLS endpoint
       (drop the `host.docker.internal` workaround); script the org/team-key
       bootstrap so `make kodus-up` is one step.
-- [ ] Structured outputs for developer file lists (`output_config.format`)
-      instead of parsing a fenced JSON array.
+- [ ] Constrained-decoding structured outputs (`output_config.format`) for the
+      developer file list — Phase 6.4's `=== FILE: … ===` block format removed
+      the JSON-escaping failure without it, so this is now only a nicety.

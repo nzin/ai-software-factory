@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/nzin/ai-software-factory/internal/factory"
 )
 
 func TestGosecParsesFixture(t *testing.T) {
@@ -33,10 +35,41 @@ func TestNPMAuditNoLockfile(t *testing.T) {
 	}
 	dir := t.TempDir()
 	write(t, dir, "package.json", `{"name":"x","version":"1.0.0"}`)
-	fs := NPM(context.Background(), dir)
+	fs := NPM(context.Background(), dir, dir)
 	// No lockfile / deps -> no findings, no crash.
 	if len(fs) != 0 {
 		t.Logf("npm audit returned %d findings (ok, tolerant)", len(fs))
+	}
+}
+
+func TestParseNPMAuditAssignsFrontendOwner(t *testing.T) {
+	// A trimmed `npm audit --json` payload: one critical, one high.
+	blob := `{"vulnerabilities":{
+		"vitest":{"severity":"critical","name":"vitest","via":[
+			{"title":"When Vitest UI server is listening, arbitrary file can be read"}]},
+		"vite":{"severity":"high","name":"vite","via":[
+			{"title":"Vite path traversal in optimized deps .map handling"}]}}}`
+
+	got := parseNPMAudit([]byte(blob), "/repo", "/repo/frontend")
+	if len(got) != 2 {
+		t.Fatalf("want 2 findings, got %d: %+v", len(got), got)
+	}
+	sev := map[string]string{}
+	for _, f := range got {
+		if f.Source != "npm-audit" {
+			t.Errorf("source = %q", f.Source)
+		}
+		if f.File != "frontend/package.json" {
+			t.Errorf("file = %q, want frontend/package.json", f.File)
+		}
+		if f.TargetRole != factory.RoleFrontendDev {
+			t.Errorf("targetRole = %q, want %q", f.TargetRole, factory.RoleFrontendDev)
+		}
+		sev[f.Title] = f.Severity
+	}
+	if sev["When Vitest UI server is listening, arbitrary file can be read"] != "critical" ||
+		sev["Vite path traversal in optimized deps .map handling"] != "high" {
+		t.Fatalf("severities not preserved: %+v", sev)
 	}
 }
 
@@ -54,6 +87,9 @@ func TestGovulncheckParsesOnlyRealFindings(t *testing.T) {
 	}
 	if got[0].Category != "GO-2024-0001" || got[0].File != "main.go" || got[0].Line != 12 {
 		t.Fatalf("bad finding: %+v", got[0])
+	}
+	if got[0].TargetRole != factory.RoleBackendDeveloper {
+		t.Fatalf("targetRole = %q, want backend-developer", got[0].TargetRole)
 	}
 	if got[0].Title != "Bug A in pkg/a" {
 		t.Fatalf("title = %q", got[0].Title)

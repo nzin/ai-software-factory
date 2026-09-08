@@ -189,10 +189,11 @@ type Run struct {
 	PRURL        string `json:"prUrl,omitempty"`
 
 	// Planner output.
-	Plan      string                    `json:"plan,omitempty"`
-	PlanTasks []factory.PlanTask        `json:"planTasks,omitempty"`
-	Approval  *factory.ApprovalDecision `json:"approval,omitempty"`
-	UISpec    string                    `json:"uiSpec,omitempty"`
+	Plan         string                    `json:"plan,omitempty"`
+	PlanTasks    []factory.PlanTask        `json:"planTasks,omitempty"`
+	Approval     *factory.ApprovalDecision `json:"approval,omitempty"`
+	UISpec       string                    `json:"uiSpec,omitempty"`
+	PlanFeedback string                    `json:"planFeedback,omitempty"` // human note for the next planner pass; consumed once
 
 	// Loop state.
 	Findings []Finding      `json:"findings,omitempty"`

@@ -190,6 +190,67 @@ func TestResumeAndReviewReject409FromTheWrongStatus(t *testing.T) {
 	}
 }
 
+func TestResumeFailedRunWithCommentOverHTTP(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil), WithDefaults(100, 0))
+	srv := serve(t, o)
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitTerminal(t, o, run.ID)
+	if failed.Status != StatusFailed {
+		t.Fatalf("status = %s, want failed", failed.Status)
+	}
+
+	var got map[string]any
+	code := doJSON(t, http.MethodPost, srv.URL+"/v1/runs/"+run.ID+"/resume",
+		map[string]any{"comment": "add // #nosec G404 to the RNG line"}, &got)
+	if code != http.StatusOK {
+		t.Fatalf("resume code = %d, want 200", code)
+	}
+	findings, _ := got["findings"].([]any)
+	found := false
+	for _, f := range findings {
+		m, _ := f.(map[string]any)
+		if m["source"] == "human" && m["title"] == "add // #nosec G404 to the RNG line" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("human finding not in response: %+v", findings)
+	}
+	waitTerminal(t, o, run.ID)
+}
+
+func TestDeleteRunOverHTTP(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil), WithDefaults(100, 0))
+	srv := serve(t, o)
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := waitTerminal(t, o, run.ID).Status; s != StatusFailed {
+		t.Fatalf("status = %s, want failed", s)
+	}
+
+	if code := doJSON(t, http.MethodDelete, srv.URL+"/v1/runs/"+run.ID, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("delete code = %d, want 204", code)
+	}
+	if code := doJSON(t, http.MethodGet, srv.URL+"/v1/runs/"+run.ID, nil, nil); code != http.StatusNotFound {
+		t.Fatalf("get-after-delete code = %d, want 404", code)
+	}
+	var list []any
+	doJSON(t, http.MethodGet, srv.URL+"/v1/runs", nil, &list)
+	if len(list) != 0 {
+		t.Fatalf("run still listed: %+v", list)
+	}
+	if code := doJSON(t, http.MethodDelete, srv.URL+"/v1/runs/"+run.ID, nil, nil); code != http.StatusNotFound {
+		t.Fatalf("second delete code = %d, want 404", code)
+	}
+}
+
 func TestGetRunExposesEventsAndSteps(t *testing.T) {
 	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
 	srv := serve(t, o)

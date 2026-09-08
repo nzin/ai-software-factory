@@ -64,6 +64,75 @@ func TestExtractJSONNested(t *testing.T) {
 	}
 }
 
+func TestRoleForPath(t *testing.T) {
+	cases := map[string]string{
+		"internal/api/handlers.go": RoleBackendDeveloper,
+		"go.mod":                   RoleBackendDeveloper,
+		"go.sum":                   RoleBackendDeveloper,
+		"frontend/src/App.vue":     RoleFrontendDev,
+		"frontend/src/main.ts":     RoleFrontendDev,
+		"frontend/package.json":    RoleFrontendDev,
+		"package.json":             RoleFrontendDev,
+		"README.md":                "",
+	}
+	for path, want := range cases {
+		if got := RoleForPath(path); got != want {
+			t.Errorf("RoleForPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestParseFileBlocks(t *testing.T) {
+	// content deliberately carries the characters that break JSON string
+	// packing: a double quote, a backslash, a brace, a blank line, a fence.
+	in := "chatter before\n" +
+		"=== FILE: internal/api/store.go ===\n" +
+		"package api\n" +
+		"\n" +
+		"// tab\\tand a \"quote\" and a } brace\n" +
+		"var x = `raw`\n" +
+		"=== END FILE: internal/api/store.go ===\n" +
+		"=== FILE: go.mod ===\n" +
+		"module x\n" +
+		"=== END FILE: go.mod ===\n" +
+		"trailing prose\n"
+
+	files, res := ParseFileBlocks(in)
+	if res.Truncated || res.Count != 2 {
+		t.Fatalf("res = %+v", res)
+	}
+	want := "package api\n\n// tab\\tand a \"quote\" and a } brace\nvar x = `raw`\n"
+	if files["internal/api/store.go"] != want {
+		t.Fatalf("store.go = %q", files["internal/api/store.go"])
+	}
+	if files["go.mod"] != "module x\n" {
+		t.Fatalf("go.mod = %q", files["go.mod"])
+	}
+}
+
+func TestParseFileBlocksTruncated(t *testing.T) {
+	in := "=== FILE: a.go ===\npackage a\n=== END FILE: a.go ===\n" +
+		"=== FILE: b.go ===\npackage b\n// cut off here"
+
+	files, res := ParseFileBlocks(in)
+	if !res.Truncated || res.LastPath != "b.go" || res.Count != 1 {
+		t.Fatalf("res = %+v", res)
+	}
+	if files["a.go"] != "package a\n" {
+		t.Fatalf("a.go = %q", files["a.go"])
+	}
+	if _, ok := files["b.go"]; ok {
+		t.Fatalf("truncated b.go should not be emitted: %q", files["b.go"])
+	}
+}
+
+func TestParseFileBlocksNone(t *testing.T) {
+	files, res := ParseFileBlocks("just prose, or maybe a JSON array elsewhere")
+	if files != nil || res.Count != 0 || res.Truncated {
+		t.Fatalf("files = %v res = %+v", files, res)
+	}
+}
+
 func TestParsePlanApproval(t *testing.T) {
 	in := "# Plan\n\n```json\n{\"tasks\":[{\"id\":\"T1\",\"role\":\"backend\",\"title\":\"API\"}]," +
 		"\"approval\":{\"required\":true,\"reason\":\"touches auth code\"}}\n```\n"

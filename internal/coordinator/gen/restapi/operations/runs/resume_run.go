@@ -28,7 +28,9 @@ func NewResumeRun(ctx *middleware.Context, handler ResumeRunHandler) *ResumeRun 
 
 // ResumeRun swagger:route POST /v1/runs/{id}/resume runs resumeRun
 //
-// Restart a run parked in needs_human_review, granting fresh budget
+// Restart a run parked in needs_human_review or failed
+//
+// Grants fresh budget and re-dispatches. With "comment" the note is recorded as a high-severity finding and routed to the responsible developer for a fix pass. With "accept" the run's branch is taken as-is (pushed / PR opened) and the run stops. With "abandon" the run is failed.
 type ResumeRun struct {
 	Context *middleware.Context
 	Handler ResumeRunHandler

@@ -49,6 +49,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			return middleware.NotImplemented("operation runs.ApproveRun has not yet been implemented")
 		}),
 
+		RunsDeleteRunHandler: runs.DeleteRunHandlerFunc(func(params runs.DeleteRunParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.DeleteRun has not yet been implemented")
+		}),
+
 		AgentsGetAgentDetailHandler: agents.GetAgentDetailHandlerFunc(func(params agents.GetAgentDetailParams) middleware.Responder {
 			_ = params
 
@@ -146,6 +152,8 @@ type CoordinatorAPI struct {
 
 	// RunsApproveRunHandler sets the operation handler for the approve run operation
 	RunsApproveRunHandler runs.ApproveRunHandler
+	// RunsDeleteRunHandler sets the operation handler for the delete run operation
+	RunsDeleteRunHandler runs.DeleteRunHandler
 	// AgentsGetAgentDetailHandler sets the operation handler for the get agent detail operation
 	AgentsGetAgentDetailHandler agents.GetAgentDetailHandler
 	// RunsGetRunHandler sets the operation handler for the get run operation
@@ -245,6 +253,9 @@ func (o *CoordinatorAPI) Validate() error {
 
 	if o.RunsApproveRunHandler == nil {
 		unregistered = append(unregistered, "runs.ApproveRunHandler")
+	}
+	if o.RunsDeleteRunHandler == nil {
+		unregistered = append(unregistered, "runs.DeleteRunHandler")
 	}
 	if o.AgentsGetAgentDetailHandler == nil {
 		unregistered = append(unregistered, "agents.GetAgentDetailHandler")
@@ -370,6 +381,10 @@ func (o *CoordinatorAPI) initHandlerCache() {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
 	o.handlers["POST"]["/v1/runs/{id}/approve"] = runs.NewApproveRun(o.context, o.RunsApproveRunHandler)
+	if o.handlers["DELETE"] == nil {
+		o.handlers["DELETE"] = make(map[string]http.Handler)
+	}
+	o.handlers["DELETE"]["/v1/runs/{id}"] = runs.NewDeleteRun(o.context, o.RunsDeleteRunHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

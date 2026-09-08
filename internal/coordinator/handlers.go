@@ -87,6 +87,16 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 		return runs.NewGetRunOK().WithPayload(runToAPI(r))
 	})
 
+	api.RunsDeleteRunHandler = runs.DeleteRunHandlerFunc(func(p runs.DeleteRunParams) middleware.Responder {
+		if _, ok := o.Get(p.ID); !ok {
+			return runs.NewDeleteRunNotFound().WithPayload(&models.Error{Message: swag.String("no such run")})
+		}
+		if err := o.Delete(context.WithoutCancel(p.HTTPRequest.Context()), p.ID); err != nil {
+			return runs.NewDeleteRunDefault(409).WithPayload(&models.Error{Message: swag.String(err.Error())})
+		}
+		return runs.NewDeleteRunNoContent()
+	})
+
 	api.RunsApproveRunHandler = runs.ApproveRunHandlerFunc(func(p runs.ApproveRunParams) middleware.Responder {
 		r, err := o.Approve(p.ID)
 		if err != nil {
@@ -114,8 +124,11 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 			opts.IterationBudget = int(p.Body.IterationBudget)
 			opts.Deadline = time.Duration(p.Body.DeadlineSeconds) * time.Second
 			opts.Abandon = p.Body.Abandon
+			opts.Accept = p.Body.Accept
+			opts.Comment = p.Body.Comment
+			opts.TargetRole = p.Body.TargetRole
 		}
-		r, err := o.Resume(p.ID, opts)
+		r, err := o.Resume(context.WithoutCancel(p.HTTPRequest.Context()), p.ID, opts)
 		if err != nil {
 			return runs.NewResumeRunDefault(409).WithPayload(&models.Error{Message: swag.String(err.Error())})
 		}
@@ -138,7 +151,7 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 				Line:       int(c.Line),
 			})
 		}
-		r, err := o.Review(p.ID, swag.StringValue(p.Body.Decision), comments)
+		r, err := o.Review(context.WithoutCancel(p.HTTPRequest.Context()), p.ID, swag.StringValue(p.Body.Decision), comments)
 		if err != nil {
 			return runs.NewReviewRunDefault(409).WithPayload(&models.Error{Message: swag.String(err.Error())})
 		}
@@ -170,7 +183,7 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 		if !ok {
 			return webhooks.NewGithubWebhookAccepted() // ping, opened, empty comment, …
 		}
-		if r, err := o.IngestPRReview(*review); err != nil {
+		if r, err := o.IngestPRReview(context.WithoutCancel(p.HTTPRequest.Context()), *review); err != nil {
 			log.Printf("coordinator: webhook %s for PR %s: %v", event, review.PRURL, err)
 		} else {
 			log.Printf("coordinator: webhook %s → run %s now %s", event, r.ID, r.Status)

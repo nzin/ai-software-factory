@@ -140,7 +140,9 @@ so the produced branches persist on the host while the working trees do not.
 **States:**
 
 ```
-queued → running ⇄ awaiting_approval          (planner gate; approve / reject)
+queued → running ⇄ awaiting_approval   (planner gate; approve | request changes:
+                                       feedback → planner revises its plan |
+                                       reject: abandon)
    running → pr_open   (remote: branch pushed + GitHub PR opened)
    running → pr_ready  (local repo: branch pushed back; new repo: branch ready)
    running → done      (no commits were produced)
@@ -148,7 +150,9 @@ queued → running ⇄ awaiting_approval          (planner gate; approve / rejec
                                    or the coordinator restarted mid-run)
    running → failed    (unrecoverable engine error, or rejected+abandoned)
 pr_ready/pr_open → { accepted (terminal) | request_changes → running }
-needs_human_review → running          (resume with +budget) | failed (abandon)
+needs_human_review | failed → running   (resume: +budget, optional comment →
+                                         routed human finding) | accepted/pr_*
+                                         (accept as-is) | failed (abandon)
 ```
 
 **TTL / budget** (`coordinator.Budget`, on every `Run`), whichever trips first:
@@ -160,8 +164,11 @@ needs_human_review → running          (resume with +budget) | failed (abandon)
 
 When the budget is spent the orchestrator stops dispatching, sets
 `needs_human_review` with a `reason`, and keeps the partial artifacts. A human
-resumes it with +N budget from the UI (`POST /v1/runs/{id}/resume`) or abandons
-it; the other resumable pause is the planner gate, via
+`POST /v1/runs/{id}/resume`s it — from `needs_human_review` **or** `failed` —
+with +N budget and, optionally, a `comment` (recorded as a high-severity
+`Finding{source:"human"}` and routed to the responsible developer for a fix
+pass) or `accept: true` (take the branch as-is: push / open the PR and stop). A
+bare resume just retries. The other resumable pause is the planner gate, via
 `POST /v1/runs/{id}/approve`.
 
 **This is a state machine, not a DAG.** A DAG is acyclic; "security-reviewer
@@ -205,6 +212,13 @@ and a new revision on the same branch. Past `maxStageIter` it parks in
 `needs_human_review` instead. `POST /v1/runs/{id}/resume` un-sticks a parked run:
 it grants budget, **clears `Attempts`** (a run stopped by the retry cap would
 otherwise re-trip at once) and restarts at `Run.LastStage`.
+
+**Deleting a run.** `DELETE /v1/runs/{id}` (`Orchestrator.Delete`) drops a run in
+a terminal state — record (`Store.Delete`) and workspace (`workspace.Manager.Remove`).
+It refuses a run that is still queued/running/awaiting_approval or has a live
+drive goroutine (`409`). There is no automatic run expiry — `pruneKeep` bounds
+only on-disk workspaces, never the run records — so a failed run stays on the
+board until deleted.
 
 **GitHub PR reviews.** `POST /v1/webhooks/github` (`internal/forge/webhook.go` +
 `Orchestrator.IngestPRReview`) is the same loop, triggered from GitHub instead of
@@ -274,7 +288,7 @@ than failing if the catalog is slow.
 **Screens.** A runs kanban bucketed by status; a run detail with the event
 timeline, the per-step record, the plan, the findings and the raw JSON, plus an
 action bar that switches on status (approve/reject · resume/abandon ·
-accept/request-changes); a submit-PRD form; and the A2A catalog roster with a
+accept/request-changes · delete when failed); a submit-PRD form; and the A2A catalog roster with a
 per-agent card view. Updates are by polling — SSE is Phase 7.
 
 ## Code generation

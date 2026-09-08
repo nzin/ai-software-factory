@@ -207,6 +207,38 @@ func init() {
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete a terminal run and its workspace",
+        "operationId": "deleteRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "deleted"
+          },
+          "404": {
+            "description": "no such run",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
       }
     },
     "/v1/runs/{id}/approve": {
@@ -280,10 +312,11 @@ func init() {
     },
     "/v1/runs/{id}/resume": {
       "post": {
+        "description": "Grants fresh budget and re-dispatches. With \"comment\" the note is recorded as a high-severity finding and routed to the responsible developer for a fix pass. With \"accept\" the run's branch is taken as-is (pushed / PR opened) and the run stops. With \"abandon\" the run is failed.\n",
         "tags": [
           "runs"
         ],
-        "summary": "Restart a run parked in needs_human_review, granting fresh budget",
+        "summary": "Restart a run parked in needs_human_review or failed",
         "operationId": "resumeRun",
         "parameters": [
           {
@@ -318,7 +351,7 @@ func init() {
     },
     "/v1/runs/{id}/review": {
       "post": {
-        "description": "Valid from status pr_ready or pr_open. \"accept\" is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
+        "description": "Valid from status pr_ready or pr_open. \"accept\" (re-)pushes the work branch to origin, opens the PR when the remote is GitHub and a token is set, and is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
         "tags": [
           "runs"
         ],
@@ -604,6 +637,14 @@ func init() {
           "description": "if true, abandon the run instead of resuming it",
           "type": "boolean"
         },
+        "accept": {
+          "description": "accept the run's branch as-is — push it / open the PR and stop, skipping the remaining pipeline stages\n",
+          "type": "boolean"
+        },
+        "comment": {
+          "description": "human guidance; recorded as a high-severity finding and routed to the responsible developer for a fix pass on resume\n",
+          "type": "string"
+        },
         "deadlineSeconds": {
           "description": "extra wall-clock to grant, in seconds (0 = the server default)",
           "type": "integer"
@@ -611,6 +652,10 @@ func init() {
         "iterationBudget": {
           "description": "extra iterations to grant (0 = the server default top-up)",
           "type": "integer"
+        },
+        "targetRole": {
+          "description": "developer the comment routes to; inferred when empty",
+          "type": "string"
         }
       }
     },
@@ -1141,6 +1186,38 @@ func init() {
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete a terminal run and its workspace",
+        "operationId": "deleteRun",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "deleted"
+          },
+          "404": {
+            "description": "no such run",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "default": {
+            "description": "error",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
       }
     },
     "/v1/runs/{id}/approve": {
@@ -1214,10 +1291,11 @@ func init() {
     },
     "/v1/runs/{id}/resume": {
       "post": {
+        "description": "Grants fresh budget and re-dispatches. With \"comment\" the note is recorded as a high-severity finding and routed to the responsible developer for a fix pass. With \"accept\" the run's branch is taken as-is (pushed / PR opened) and the run stops. With \"abandon\" the run is failed.\n",
         "tags": [
           "runs"
         ],
-        "summary": "Restart a run parked in needs_human_review, granting fresh budget",
+        "summary": "Restart a run parked in needs_human_review or failed",
         "operationId": "resumeRun",
         "parameters": [
           {
@@ -1252,7 +1330,7 @@ func init() {
     },
     "/v1/runs/{id}/review": {
       "post": {
-        "description": "Valid from status pr_ready or pr_open. \"accept\" is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
+        "description": "Valid from status pr_ready or pr_open. \"accept\" (re-)pushes the work branch to origin, opens the PR when the remote is GitHub and a token is set, and is terminal. With \"request_changes\" every comment becomes a Finding{source:\"human\"} and the run re-enters the factory at the responsible developer.\n",
         "tags": [
           "runs"
         ],
@@ -1538,6 +1616,14 @@ func init() {
           "description": "if true, abandon the run instead of resuming it",
           "type": "boolean"
         },
+        "accept": {
+          "description": "accept the run's branch as-is — push it / open the PR and stop, skipping the remaining pipeline stages\n",
+          "type": "boolean"
+        },
+        "comment": {
+          "description": "human guidance; recorded as a high-severity finding and routed to the responsible developer for a fix pass on resume\n",
+          "type": "string"
+        },
         "deadlineSeconds": {
           "description": "extra wall-clock to grant, in seconds (0 = the server default)",
           "type": "integer"
@@ -1545,6 +1631,10 @@ func init() {
         "iterationBudget": {
           "description": "extra iterations to grant (0 = the server default top-up)",
           "type": "integer"
+        },
+        "targetRole": {
+          "description": "developer the comment routes to; inferred when empty",
+          "type": "string"
         }
       }
     },

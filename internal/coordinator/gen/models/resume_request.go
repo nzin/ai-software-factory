@@ -17,11 +17,22 @@ type ResumeRequest struct {
 	// if true, abandon the run instead of resuming it
 	Abandon bool `json:"abandon,omitempty"`
 
+	// accept the run's branch as-is — push it / open the PR and stop, skipping the remaining pipeline stages
+	//
+	Accept bool `json:"accept,omitempty"`
+
+	// human guidance; recorded as a high-severity finding and routed to the responsible developer for a fix pass on resume
+	//
+	Comment string `json:"comment,omitempty"`
+
 	// extra wall-clock to grant, in seconds (0 = the server default)
 	DeadlineSeconds int64 `json:"deadlineSeconds,omitempty"`
 
 	// extra iterations to grant (0 = the server default top-up)
 	IterationBudget int64 `json:"iterationBudget,omitempty"`
+
+	// developer the comment routes to; inferred when empty
+	TargetRole string `json:"targetRole,omitempty"`
 }
 
 // Validate validates this resume request

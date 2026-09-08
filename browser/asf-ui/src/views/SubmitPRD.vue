@@ -18,13 +18,15 @@ const form = reactive({
   deadlineSeconds: 0,
 })
 
-// The coordinator parses a markdown PRD itself (first `# heading` is the title),
-// so a title field is only a convenience — prepend it when the body has none.
+// The coordinator parses a markdown PRD itself (first `# ` heading is the title),
+// so a title field is only a convenience — prepend it unless the body already
+// carries its own top-level `# ` heading. A body that starts with `##` has no
+// title of its own, so the field is still prepended.
 const body = computed(() => {
   const md = form.markdown.trim()
   const t = form.title.trim()
   if (!t) return md
-  return md.startsWith('#') ? md : `# ${t}\n\n${md}`
+  return md.startsWith('# ') ? md : `# ${t}\n\n${md}`
 })
 
 const repoHint = computed(() => {

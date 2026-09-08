@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -81,9 +82,20 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 	}
 }
 
-// plannerInput is the PRD text plus a repository snapshot so the plan is grounded.
+// plannerInput is the PRD text plus a repository snapshot so the plan is
+// grounded. On a human-requested revision it also carries the previous plan and
+// the requested changes.
 func (e *pipelineEngine) plannerInput(ctx context.Context, run *Run) string {
 	in := run.PRD.Text()
+	if fb := strings.TrimSpace(run.PlanFeedback); fb != "" {
+		var b strings.Builder
+		b.WriteString("# Revise the previous plan\n\nA human reviewed your last plan and asked for changes. Produce an updated plan that addresses this feedback; keep the parts that were already fine.\n\n")
+		if strings.TrimSpace(run.Plan) != "" {
+			b.WriteString("## Your previous plan\n\n" + run.Plan + "\n\n")
+		}
+		b.WriteString("## Requested changes\n\n" + fb + "\n\n")
+		in = b.String() + in
+	}
 	if run.WorkspaceDir == "" {
 		return in
 	}
