@@ -133,7 +133,11 @@ it `git clone`s from `./local_git` into `factory-workspace/<runID>/repo` and, on
 finish, `git push`es the `asf/run-<id>` branch back. `make up` seeds the shared
 repo `./local_git/project` that empty-`repoURL` runs clone (`ASF_DEFAULT_REPO` /
 `coordinator.WithDefaultRepo`), instead of scaffolding a throwaway repo per run —
-so the produced branches persist on the host while the working trees do not.
+so the produced branches persist on the host while the working trees do not. A
+bare-name `repoURL` (no `/`, e.g. `"demo"`) is likewise resolved under
+`./local_git/<name>` and auto-`git init`'d on first use (`ASF_LOCAL_GIT_ROOT` /
+`workspace.Manager.LocalGitRoot`, default `./local_git`), then treated as an
+existing local repo from then on.
 
 ## Run lifecycle, TTL, and human review
 

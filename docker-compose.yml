@@ -65,6 +65,9 @@ services:
       # A PRD submitted with an empty repoURL is cloned from this shared repo
       # (created by `make up`) instead of scaffolding a throwaway one.
       ASF_DEFAULT_REPO: /var/lib/asf/local_git/project
+      # Bare-name repoURLs (e.g. "demo") resolve to <root>/<name> here and are
+      # auto-git-init'd on first use.
+      ASF_LOCAL_GIT_ROOT: /var/lib/asf/local_git
       ASF_RUNSTORE: /data/runs.db
       ASF_BASE_BRANCH: ${ASF_BASE_BRANCH:-main}
       # Optional: open a GitHub PR when a run targets a github.com remote.

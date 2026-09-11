@@ -247,6 +247,89 @@ func TestAddPathsBeatsAModelAuthoredGitignore(t *testing.T) {
 	}
 }
 
+func TestIsBareName(t *testing.T) {
+	cases := map[string]bool{
+		"":                   false,
+		"demo":               true,
+		"my_new_project":     true,
+		"/tmp/x":             false,
+		"./local_git/x":      false,
+		"file:///tmp/x":      false,
+		"https://x/y.git":    false,
+		"git@host:repo":      false,
+		"git@host:user/repo": false,
+	}
+	for in, want := range cases {
+		if got := isBareName(in); got != want {
+			t.Errorf("isBareName(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestPrepareBareNameCreatesAndPersistsLocalGitProject(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	m := NewManager(t.TempDir())
+	m.LocalGitRoot = t.TempDir()
+
+	repo, err := m.Prepare(ctx, "run-1", newRef("demo"))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if repo.Kind != KindLocal {
+		t.Fatalf("kind = %s, want local", repo.Kind)
+	}
+	wantSrc, _ := filepath.Abs(filepath.Join(m.LocalGitRoot, "demo"))
+	if repo.Source != wantSrc {
+		t.Fatalf("source = %q, want %q", repo.Source, wantSrc)
+	}
+	if !isGitRepo(wantSrc) {
+		t.Fatalf("expected a persistent git repo at %s", wantSrc)
+	}
+
+	if _, err := repo.WriteFiles(map[string]string{"a.txt": "a\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Commit(ctx, "backend-developer", "add a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Push(ctx); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if out, _ := git(ctx, wantSrc, "branch", "--list", "asf/run-run-1"); !strings.Contains(out, "asf/run-run-1") {
+		t.Fatalf("branch not pushed back to local_git project: %q", out)
+	}
+}
+
+func TestPrepareBareNameReusesExistingProject(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	m := NewManager(t.TempDir())
+	m.LocalGitRoot = t.TempDir()
+
+	if _, err := m.Prepare(ctx, "run-1", newRef("demo")); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	projectDir, _ := filepath.Abs(filepath.Join(m.LocalGitRoot, "demo"))
+	firstHead, _ := git(ctx, projectDir, "rev-parse", "HEAD")
+
+	repo2, err := m.Prepare(ctx, "run-2", newRef("demo"))
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if repo2.Kind != KindLocal {
+		t.Fatalf("kind = %s, want local", repo2.Kind)
+	}
+	secondHead, _ := git(ctx, projectDir, "rev-parse", "HEAD")
+	if strings.TrimSpace(firstHead) != strings.TrimSpace(secondHead) {
+		t.Fatalf("bare-name project was reinitialized: %q -> %q", firstHead, secondHead)
+	}
+}
+
 func TestPrune(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")

@@ -80,9 +80,32 @@ func isGitRepo(path string) bool {
 	return err == nil && strings.TrimSpace(out) != ""
 }
 
+// isBareName reports whether url is a plain token (no path separator, no
+// "://" scheme, not an scp-like remote such as git@host:repo) that should
+// resolve to a persistent project under Manager.LocalGitRoot instead of a
+// filesystem path relative to the process's CWD. "" keeps its existing
+// KindNew/throwaway meaning and is not a bare name.
+func isBareName(url string) bool {
+	if url == "" || strings.ContainsAny(url, "/\\") {
+		return false
+	}
+	if strings.Contains(url, "://") {
+		return false
+	}
+	if strings.Contains(url, "@") && strings.Contains(url, ":") {
+		return false // scp-like remote, e.g. git@host:repo
+	}
+	return true
+}
+
 // Manager owns the workspace root and prepares per-run repos.
 type Manager struct {
 	Root string
+	// LocalGitRoot is the directory a bare-name repoURL (e.g. "demo") resolves
+	// under, as <LocalGitRoot>/<name>. Empty defaults to "local_git" at the
+	// point of use (see resolveBareName), the sibling-directory convention
+	// `make local-git` already uses for the seeded project repo.
+	LocalGitRoot string
 }
 
 // NewManager returns a Manager rooted at root (default: ./workspace).
@@ -108,6 +131,10 @@ func branchName(runID string) string {
 // Prepare resolves ref into a per-run workspace and returns a Repo on the run's
 // branch. It replaces the Phase-2 Create.
 func (m *Manager) Prepare(ctx context.Context, runID string, ref RepoRef) (*Repo, error) {
+	ref, err := m.resolveBareName(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
 	dir := m.RepoDir(runID)
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return nil, err
@@ -159,6 +186,45 @@ func (m *Manager) Prepare(ctx context.Context, runID string, ref RepoRef) (*Repo
 		}
 	}
 	return repo, nil
+}
+
+// resolveBareName rewrites a bare-name repoURL into the absolute path of a
+// persistent project under LocalGitRoot, git-init'ing it (init + identity +
+// empty base commit, matching `make local-git`'s bootstrap) the first time
+// that name is used. Once the repo exists on disk, ref.Kind() resolves to
+// KindLocal on this and every later call, so Prepare needs no bare-name-
+// specific branch — the existing clone/push-back path just runs.
+func (m *Manager) resolveBareName(ctx context.Context, ref RepoRef) (RepoRef, error) {
+	if !isBareName(ref.URL) {
+		return ref, nil
+	}
+	root := m.LocalGitRoot
+	if root == "" {
+		root = "local_git"
+	}
+	dir, err := filepath.Abs(filepath.Join(root, ref.URL))
+	if err != nil {
+		return ref, fmt.Errorf("workspace: resolve local_git project %q: %w", ref.URL, err)
+	}
+	if !isGitRepo(dir) {
+		base := ref.BaseBranch
+		if base == "" {
+			base = "main"
+		}
+		if err := runAll(ctx, dir, [][]string{{"init", "-q", "-b", base}}, true); err != nil {
+			return ref, fmt.Errorf("workspace: init local_git project %q: %w", ref.URL, err)
+		}
+		if err := (&Repo{Dir: dir}).configIdentity(ctx); err != nil {
+			return ref, fmt.Errorf("workspace: init local_git project %q: %w", ref.URL, err)
+		}
+		if err := runAll(ctx, dir, [][]string{
+			{"commit", "-q", "--allow-empty", "-m", "chore: base"},
+		}, false); err != nil {
+			return ref, fmt.Errorf("workspace: init local_git project %q: %w", ref.URL, err)
+		}
+	}
+	ref.URL = dir
+	return ref, nil
 }
 
 func cloneInto(ctx context.Context, url, dir, base, branch string) error {

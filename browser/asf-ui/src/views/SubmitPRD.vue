@@ -87,7 +87,7 @@ async function submit() {
       </el-form-item>
 
       <el-form-item label="Target repository">
-        <el-input v-model="form.repoURL" placeholder="(empty) · /tmp/myrepo · https://github.com/me/repo" />
+        <el-input v-model="form.repoURL" placeholder="(empty) · demo · /tmp/myrepo · https://github.com/me/repo" />
         <p class="hint">{{ repoHint }}</p>
       </el-form-item>
 

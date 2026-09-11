@@ -55,13 +55,15 @@ func usage() {
 	os.Exit(2)
 }
 
-func newOrchestrator(catalogURL, wsRoot, storeDSN, baseBranch string, extra ...coordinator.Option) *coordinator.Orchestrator {
+func newOrchestrator(catalogURL, wsRoot, localGitRoot, storeDSN, baseBranch string, extra ...coordinator.Option) *coordinator.Orchestrator {
 	cc, err := agentkit.NewCatalogClient(catalogURL)
 	if err != nil {
 		log.Fatalf("coordinator: %v", err)
 	}
+	wsMgr := workspace.NewManager(wsRoot)
+	wsMgr.LocalGitRoot = localGitRoot
 	opts := []coordinator.Option{
-		coordinator.WithWorkspace(workspace.NewManager(wsRoot)),
+		coordinator.WithWorkspace(wsMgr),
 		coordinator.WithBaseBranch(baseBranch),
 	}
 	if storeDSN != "" && storeDSN != "memory" {
@@ -87,6 +89,8 @@ func cmdSubmit(args []string) {
 	out := fs.String("out", "", "write the plan to this file instead of stdout")
 	catalogURL := fs.String("catalog-url", envOr("ASF_CATALOG_URL", "http://127.0.0.1:8080"), "catalog base URL")
 	wsRoot := fs.String("workspace-root", envOr("ASF_WORKSPACE_ROOT", "workspace"), "root dir for per-run workspaces")
+	localGitRoot := fs.String("local-git-root", envOr("ASF_LOCAL_GIT_ROOT", "local_git"),
+		"root dir a bare-name repo (e.g. --repo demo) resolves under, as <root>/<name>; auto-init'd on first use")
 	budget := fs.Int("budget", 0, "override the iteration budget (0 = default)")
 	deadline := fs.Duration("deadline", 0, "override the wall-clock budget (0 = default)")
 	autoApprove := fs.Bool("yes", false, "auto-approve the plan at the approval gate")
@@ -100,7 +104,7 @@ func cmdSubmit(args []string) {
 		log.Fatalf("coordinator submit: %v", err)
 	}
 
-	orch := newOrchestrator(*catalogURL, *wsRoot, "memory", *baseBranch)
+	orch := newOrchestrator(*catalogURL, *wsRoot, *localGitRoot, "memory", *baseBranch)
 	run, err := orch.Submit(context.Background(), doc, coordinator.SubmitOptions{
 		RepoURL: *repoURL, BaseBranch: *baseBranch,
 		IterationBudget: *budget, Deadline: *deadline,
@@ -157,6 +161,8 @@ func cmdServe(args []string) {
 	addr := fs.String("addr", ":8090", "host:port to listen on")
 	catalogURL := fs.String("catalog-url", envOr("ASF_CATALOG_URL", "http://127.0.0.1:8080"), "catalog base URL")
 	wsRoot := fs.String("workspace-root", envOr("ASF_WORKSPACE_ROOT", "workspace"), "root dir for per-run workspaces")
+	localGitRoot := fs.String("local-git-root", envOr("ASF_LOCAL_GIT_ROOT", "local_git"),
+		"root dir a bare-name repo (e.g. repoURL: \"demo\") resolves under, as <root>/<name>; auto-init'd on first use")
 	store := fs.String("runstore", envOr("ASF_RUNSTORE", "memory"), "'memory' or a SQLite path for durable runs")
 	baseBranch := fs.String("base-branch", envOr("ASF_BASE_BRANCH", "main"), "default branch to base work on")
 	budget := fs.Int("iteration-budget", coordinator.DefaultIterationBudget, "default per-run iteration budget")
@@ -167,7 +173,7 @@ func cmdServe(args []string) {
 		"repo a submission targets when its repoURL is empty (default: scaffold a throwaway repo)")
 	_ = fs.Parse(args)
 
-	orch := newOrchestrator(*catalogURL, *wsRoot, *store, *baseBranch,
+	orch := newOrchestrator(*catalogURL, *wsRoot, *localGitRoot, *store, *baseBranch,
 		coordinator.WithDefaults(*budget, *deadline),
 		coordinator.WithDefaultRepo(*defaultRepo))
 

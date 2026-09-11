@@ -178,7 +178,11 @@ empty-`repoURL` runs clone; `make reset-workspace` wipes `./local_git`.
 To target an existing repo, pass `repoURL`: a local path / `file:///abs/path`
 (cloned from, and the `asf/run-<id>` branch pushed back to it), or an
 `https://github.com/...` URL (cloned; branch pushed and a PR opened when
-`GITHUB_TOKEN` is set). With `GITHUB_WEBHOOK_SECRET` set and a webhook wired
+`GITHUB_TOKEN` is set). A bare name with no path separators (e.g.
+`repoURL: "demo"`) creates/reuses `local_git/demo` the same way `make
+local-git` seeds `local_git/project`, then behaves like any other existing
+local repo from then on — configurable via `--local-git-root`/
+`ASF_LOCAL_GIT_ROOT` (default `./local_git`). With `GITHUB_WEBHOOK_SECRET` set and a webhook wired
 (see [scripts/github-webhook.md](scripts/github-webhook.md)), a review left on
 that PR re-enters the factory as another `request_changes` round.
 
