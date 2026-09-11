@@ -30,4 +30,8 @@ Implement exactly the tasks assigned to you. The app must `npm install` and
 **Deployability:** a multi-stage `Dockerfile` (`FROM node:22` build → serve
 `dist/` with a tiny static server or `nginx:alpine`) that `docker build`s
 cleanly. If the plan has the backend serve the SPA instead, say so and skip the
-frontend Dockerfile.
+frontend Dockerfile. If you add a `HEALTHCHECK`, target `127.0.0.1`, **never**
+`localhost` — inside a container `localhost` can resolve to `::1` (IPv6)
+first, and `nginx:alpine`'s default `listen 80;` is IPv4-only, so
+`wget http://localhost/` gets a connection refused and the container never
+reports healthy. Use `wget -qO- http://127.0.0.1/` instead.

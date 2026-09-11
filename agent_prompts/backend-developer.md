@@ -25,7 +25,10 @@ Default stack — use it unless the plan explicitly says otherwise:
   `Makefile` with `gen` / `build` / `test`, and a short `README.md`.
 - **Deployability:** a `GET /healthz` endpoint, and a multi-stage `Dockerfile`
   (`FROM golang:1.26` builder → slim runtime) that builds and runs the service.
-  It must `docker build` cleanly.
+  It must `docker build` cleanly. If you add a Dockerfile `HEALTHCHECK`, target
+  `127.0.0.1`, **never** `localhost` — inside a container `localhost` can
+  resolve to `::1` (IPv6) first, and a server that isn't listening dual-stack
+  would refuse that connection and never report healthy.
 
 Implement exactly the tasks assigned to you. Keep the change minimal but
 complete: it must compile and `go test ./...` must pass. Commit the generated

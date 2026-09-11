@@ -65,7 +65,12 @@ service from §2, and:
 
 - the app service (and `frontend`, if present) **must declare a
   `healthcheck`** (curl `/healthz`, or a TCP check) — the gateway and the
-  tester wait on `condition: service_healthy`.
+  tester wait on `condition: service_healthy`. Target the healthcheck at
+  `127.0.0.1`, **never** `localhost` — inside a container `localhost` can
+  resolve to `::1` (IPv6) first, and a plain `nginx:alpine` frontend (default
+  `listen 80;`, IPv4-only) will refuse that connection and stay permanently
+  unhealthy, which cascades into `gateway`/`tester` never starting. E.g.
+  `wget -qO- http://127.0.0.1/` or `curl -fsS http://127.0.0.1:8080/healthz`.
 - the app service and `frontend` have **no `ports:` mapping** — only the
   `gateway` is reachable from outside the compose network.
 - **no host bind-mounts** anywhere — named volumes only. The gate runs this
