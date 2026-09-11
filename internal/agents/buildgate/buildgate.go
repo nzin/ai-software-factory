@@ -64,12 +64,25 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			}
 		}
 
+		var commitSHA string
+		var filesWritten []string
+		if len(res.Screenshots) > 0 {
+			if err := repo.AddPaths(ctx, res.Screenshots); err == nil {
+				if sha, err := repo.Commit(ctx, env.Stage, "attach e2e screenshots"); err == nil && sha != "" {
+					commitSHA = sha
+					filesWritten = res.Screenshots
+				}
+			}
+		}
+
 		return factory.ResultEnvelope{
-			Role:       env.Stage,
-			Summary:    fmt.Sprintf("%s (%d findings)", res.Summary, len(findings)),
-			Findings:   findings,
-			Verdict:    factory.VerdictFor(findings),
-			TargetRole: factory.RouteRole(findings, ""),
+			Role:         env.Stage,
+			Summary:      fmt.Sprintf("%s (%d findings)", res.Summary, len(findings)),
+			Findings:     findings,
+			Verdict:      factory.VerdictFor(findings),
+			TargetRole:   factory.RouteRole(findings, ""),
+			CommitSHA:    commitSHA,
+			FilesWritten: filesWritten,
 		}, nil
 	})
 }

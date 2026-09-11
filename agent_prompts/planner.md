@@ -44,7 +44,11 @@ sections:
    developer owns each service's Dockerfile; add explicit tasks if the repo has
    none. The **test-engineer** (a separate agent that runs after the developers)
    owns the root `docker-compose.yml` and a `docker-compose.test.yml` overlay
-   plus a component test suite — do not assign those to a developer.
+   plus a component test suite — do not assign those to a developer. When the
+   plan includes a browser-facing frontend, the deployment is reached through a
+   single gateway (Traefik) that the test-engineer wires in front of the
+   backend and frontend — no separate gateway task is needed, just make sure a
+   frontend developer task exists when the PRD needs one.
 9. Risks & open questions.
 
 Be specific and terse. Do not write code; describe what to build. If the PRD is

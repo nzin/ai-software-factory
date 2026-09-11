@@ -8,6 +8,7 @@ package buildgate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -41,11 +42,13 @@ type Failure struct {
 }
 
 // Result is what Check returns: the deterministic findings (file:line anchors),
-// a one-line summary, and the raw failures.
+// a one-line summary, the raw failures, and any Playwright screenshots pulled
+// out of the tester container (paths relative to the workspace dir).
 type Result struct {
-	Findings []factory.Finding
-	Summary  string
-	Failures []Failure
+	Findings    []factory.Finding
+	Summary     string
+	Failures    []Failure
+	Screenshots []string
 }
 
 // Check builds, tests, validates deployment and runs component tests under dir.
@@ -104,13 +107,18 @@ func Check(ctx context.Context, runID, dir string, changed []string) Result {
 	} else {
 		summary += " — " + strconv.Itoa(len(c.findings)) + " problem(s)"
 	}
-	return Result{Findings: c.findings, Summary: summary, Failures: c.failures}
+	if c.testBreakdown != "" {
+		summary += " (" + c.testBreakdown + ")"
+	}
+	return Result{Findings: c.findings, Summary: summary, Failures: c.failures, Screenshots: c.screenshots}
 }
 
 type checker struct {
-	dir      string
-	findings []factory.Finding
-	failures []Failure
+	dir           string
+	findings      []factory.Finding
+	failures      []Failure
+	screenshots   []string // paths relative to dir, pulled from the tester container
+	testBreakdown string   // e.g. "api 8/8 passed, e2e 5/5 passed, 3 screenshot(s) captured"
 }
 
 func (c *checker) add(f factory.Finding) { c.findings = append(c.findings, f) }
@@ -273,6 +281,11 @@ func (c *checker) checkCompose(ctx context.Context, dir string) {
 
 // checkComponent runs the tester service in the compose stack and treats its
 // exit code as the verdict. It always tears the stack down.
+//
+// The gateway's host port defaults to 8080 in the generated docker-compose.yml
+// (${GATEWAY_PORT:-8080}) for a real deployment; here it's overridden to an
+// ephemeral port (GATEWAY_PORT=0) so concurrent runs' stacks never collide on
+// a fixed host port — see checkComponent's caller doc and test-engineer.md.
 func (c *checker) checkComponent(ctx context.Context, runID, dir string) {
 	base := composeFile(dir)
 	proj := "asf-" + shortID(runID)
@@ -290,7 +303,8 @@ func (c *checker) checkComponent(ctx context.Context, runID, dir string) {
 	defer cancel()
 	up := append([]string{"compose"}, files...)
 	up = append(up, "up", "--build", "--quiet-pull", "--abort-on-container-exit", "--exit-code-from", "tester")
-	if out, ok := run(cctx, dir, nil, "docker", up...); !ok {
+	out, ok := run(cctx, dir, []string{"GATEWAY_PORT=0"}, "docker", up...)
+	if !ok {
 		c.fail("component tests", out, factory.RoleBackendDeveloper)
 		c.add(factory.Finding{
 			Source:     "build-gate",
@@ -301,6 +315,62 @@ func (c *checker) checkComponent(ctx context.Context, runID, dir string) {
 			TargetRole: factory.RoleBackendDeveloper,
 		})
 	}
+
+	// The tester container is stopped but not removed yet (the `down` above is
+	// deferred) — pull out any Playwright screenshots and report what ran,
+	// regardless of pass/fail.
+	c.extractScreenshots(ctx, dir, files)
+	c.testBreakdown = summarizeComponentTests(out, len(c.screenshots))
+}
+
+// extractScreenshots best-effort docker-cp's /output/screenshots out of the
+// tester container (the fixed path test-engineer.md's Playwright suite writes
+// to) into <dir>/test/e2e/screenshots, and records what landed there. A
+// service with no frontend has no such path — that's not an error.
+func (c *checker) extractScreenshots(ctx context.Context, dir string, files []string) {
+	xctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	ps := append([]string{"compose"}, files...)
+	ps = append(ps, "ps", "-a", "-q", "tester")
+	idOut, ok := run(xctx, dir, nil, "docker", ps...)
+	id := strings.TrimSpace(strings.SplitN(idOut, "\n", 2)[0])
+	if !ok || id == "" {
+		return
+	}
+
+	dest := filepath.Join(dir, "test", "e2e", "screenshots")
+	_ = os.RemoveAll(dest)
+	if _, ok := run(xctx, dir, nil, "docker", "cp", id+":/output/screenshots", dest); !ok {
+		return
+	}
+
+	_ = filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if rel, err := filepath.Rel(dir, p); err == nil {
+			c.screenshots = append(c.screenshots, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+}
+
+// summarizeComponentTests reports how many [api] and [e2e] tests passed, from
+// the PASS [api]/FAIL [api]/PASS [e2e]/FAIL [e2e] lines test-engineer.md's two
+// suites print, plus how many screenshots were captured.
+func summarizeComponentTests(out string, screenshots int) string {
+	var parts []string
+	if apiPass, apiFail := strings.Count(out, "PASS [api]"), strings.Count(out, "FAIL [api]"); apiPass+apiFail > 0 {
+		parts = append(parts, fmt.Sprintf("api %d/%d passed", apiPass, apiPass+apiFail))
+	}
+	if e2ePass, e2eFail := strings.Count(out, "PASS [e2e]"), strings.Count(out, "FAIL [e2e]"); e2ePass+e2eFail > 0 {
+		parts = append(parts, fmt.Sprintf("e2e %d/%d passed", e2ePass, e2ePass+e2eFail))
+	}
+	if screenshots > 0 {
+		parts = append(parts, fmt.Sprintf("%d screenshot(s) captured", screenshots))
+	}
+	return strings.Join(parts, ", ")
 }
 
 var codeExt = map[string]bool{

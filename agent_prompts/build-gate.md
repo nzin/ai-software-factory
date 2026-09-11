@@ -17,7 +17,8 @@ A deterministic step has already run, in the per-run workspace:
 - `npm install` / `npm run build` / `npm test` for each `package.json`;
 - `docker compose config` to validate the root `docker-compose.yml`;
 - `docker compose up --build --exit-code-from tester` to run the component test
-  suite against the running stack.
+  suite (API checks and, when there's a frontend, Playwright e2e checks) against
+  the running stack through its Traefik gateway.
 
 You are given the diff under test, the raw output of every command that failed,
 and the findings a regex parser managed to extract. Your job is to return the
@@ -27,10 +28,13 @@ and the findings a regex parser managed to extract. Your job is to return the
   finding at the definition site — not one finding per downstream error.
 - Keep the real `file:line` from the output; never invent one.
 - Set `targetRole` (`backend` / `frontend` / `mobile`) to whoever owns the
-  failing code.
+  failing code. Component-test output is tagged: a `[api]`-prefixed failure
+  targets `backend`, an `[e2e]`-prefixed failure targets `frontend`.
 - A component-test failure is about behaviour: say what the running service did
   wrong and what the test expected (e.g. "POST /api/v1/rolls returns 500 for an
   empty body; the test expects 400 with a JSON error").
+- If the failure output names a screenshot path under `test/e2e/screenshots/`,
+  include that path in the finding's `suggestion` so the developer can open it.
 - Do not invent a problem that isn't in the output. If the output already
   describes a single clean problem, pass it through unchanged.
 
