@@ -7,32 +7,53 @@ Agents talk to each other over the [A2A protocol](https://a2a-protocol.org/)
 using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
 
 > **Status: Phase 5.** The full agent roster (planner, UI/UX designer, backend /
-> frontend / mobile developers, **build gate**, security reviewer, code reviewer);
-> the coordinator loop with a **feedback loop** (reviewers and the build gate
+> frontend / mobile developers, **test engineer**, **build gate**, security
+> reviewer, code reviewer); the coordinator loop with a **feedback loop** (reviewers and the build gate
 > route `request_changes` back to a developer until they pass or a per-stage cap
 > trips), a **human approval gate** after planning, **real git repositories**
 > (new / local clone + push / remote clone + push + GitHub PR), a **build/test gate**
-> that compiles and tests every commit before the reviewers see it, a **GitHub
-> PR-review webhook** that re-enters the factory when someone reviews the PR,
-> **durable async runs** with a per-run event log, and a **web UI** at
-> `http://localhost:8090` — runs kanban, per-run timeline, PR revision history,
-> A2A catalog, approve / request-changes controls. See [`plan_next.md`](plan_next.md).
+> that compiles, tests, and deploys every commit (through a generated **Traefik**
+> gateway, exercised by generated **Playwright** e2e tests) before the reviewers
+> see it, a **GitHub PR-review webhook** that re-enters the factory when someone
+> reviews the PR, **durable async runs** with a per-run event log, and a **web
+> UI** at `http://localhost:8090` — runs kanban, per-run timeline, PR revision
+> history, A2A catalog, approve / request-changes controls. See
+> [`plan_next.md`](plan_next.md).
 
 ## Architecture
 
-```
-  PRD + repoURL ─▶ coordinator ──(discover via catalog, dispatch over A2A)──▶ agents
-             │                                                        │
-             │   planner ─▶ [human approval gate] ─▶ ui-ux-designer   ▼
-             │     ─▶ {backend, frontend, mobile} developers        Claude
-             │     ─▶ build-gate ─▶ security-reviewer ─▶ code-reviewer (per-agent
-             │            │              │                   │         model, set
-             │            └── request_changes / build_failed ┘         by catalog)
-             │                 (back to a dev, bounded by a per-role attempt cap)
-             ▼
-       per-run workspace  (new repo / clone of a local repo / clone of a
-       remote) on branch asf/run-<id>; on finish: push + open a PR, or pr_ready.
-       A GitHub PR review webhooks back in as another request_changes round.
+### Pipeline workflow
+
+What happens, in order, for one run. Conditional stages only run when the
+planner assigned them work; the dashed edges are the feedback loop — a failed
+gate or review bounces back to the responsible developer instead of failing the
+run, bounded by a per-role attempt cap (default 3).
+
+```mermaid
+flowchart TD
+    PRD["PRD + repoURL"] --> Planner[planner]
+    Planner --> Gate{{"human approval gate\n(conditional)"}}
+    Gate --> UIUX["ui-ux-designer\n(conditional: frontend/mobile work)"]
+    UIUX --> Dev
+
+    subgraph Dev["developers (only roles with assigned tasks)"]
+        direction LR
+        BE[backend-developer] --> FE[frontend-developer] --> MOB[mobile-developer]
+    end
+
+    Dev --> TestEng["test-engineer\n(component tests, Playwright e2e,\nTraefik gateway, docker-compose)"]
+    TestEng --> BuildGate["build-gate (no LLM)\ncompile · unit tests · compose validate\ncomponent + e2e tests via gateway"]
+    BuildGate --> Sec[security-reviewer]
+    Sec --> Code[code-reviewer]
+    Code --> PR["branch pushed / PR opened"]
+
+    BuildGate -.->|build_failed| Dev
+    Sec -.->|request_changes| Dev
+    Code -.->|request_changes| Dev
+    PR -.->|GitHub PR review| Dev
+
+    classDef gate fill:#f5f5f5,stroke:#999
+    class Gate gate
 ```
 
 - **catalog** — REST service (`go-swagger`, spec-first: `api/catalog.swagger.yml`).
@@ -51,13 +72,121 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
   and survive a coordinator restart.
 - **agents** — A2A agents built on `internal/agentkit` (register with the
   catalog, fetch model config, serve `/.well-known/agent-card.json` + `/invoke`).
-  Developers write files into the checkout; **`build-gate`** (`internal/buildgate`,
-  no LLM) runs `go build`/`go test` and `npm run build` and bounces a broken
-  commit back to its author; `security-reviewer` runs SAST (gosec / govulncheck /
-  `npm audit`) plus an LLM pass; `code-reviewer` shells
+  Developers write files into the checkout; **`test-engineer`** then writes a
+  component-test suite, a Playwright e2e suite, and the deployment glue (a
+  generated Traefik gateway + `docker-compose.yml`); **`build-gate`**
+  (`internal/buildgate`, no LLM) compiles, tests, and deploys the workspace,
+  bouncing a broken commit back to its author; `security-reviewer` runs SAST
+  (gosec / govulncheck / `npm audit`) plus an LLM pass; `code-reviewer` shells
   out to the [Kodus](https://kodus.io/) CLI.
 - **web UI** — a Vue 3 SPA (`browser/asf-ui`) served by the coordinator at `/`,
   same-origin with its API. See [Web UI](#web-ui).
+
+### A2A service architecture
+
+The pipeline diagram above shows *what happens in what order* for one run. This
+shows *what talks to what*, independent of any run: the catalog is a
+registry/config store, not a message broker — the coordinator discovers agents
+through it but dispatches work **directly** to each agent over A2A.
+
+```mermaid
+flowchart TB
+    subgraph Catalog["catalog (registry, go-swagger + GORM/SQLite)"]
+        CatalogSvc["stores: role, base URL, skills,\nconcurrency, model config\nassembles each AgentCard"]
+    end
+
+    Coordinator["coordinator\n(orchestrator + REST API + web UI)"]
+
+    subgraph Agents["agents (each: /invoke + agent-card.json)"]
+        direction LR
+        A1[planner]
+        A2[ui-ux-designer]
+        A3[backend-developer]
+        A4[frontend-developer]
+        A5[mobile-developer]
+        A6[test-engineer]
+        A7[build-gate]
+        A8[security-reviewer]
+        A9[code-reviewer]
+    end
+
+    Coordinator -->|discover roster + model config| Catalog
+    Coordinator ==>|dispatch over A2A /invoke| Agents
+    Agents -.->|register on startup\nPUT /v1/agents/:role| Catalog
+
+    Workspace[("factory-workspace volume\n(per-run checkout, mounted /workspace)")]
+    LocalGit[("./local_git\n(git remote, coordinator-only)")]
+
+    Coordinator --- Workspace
+    Agents --- Workspace
+    Coordinator --- LocalGit
+```
+
+Each agent's `AgentCard` carries its Claude model config (`provider` / `model` /
+`maxTokens` / `effort` / `thinking`) as a custom A2A capability extension
+(`internal/modelext`, `AgentCard.Capabilities.Extensions`) — so unlike a typical
+single-model setup, every role can run a different model, set per-agent in
+`agent_prompts/<role>.md` and re-asserted into the catalog on every restart. See
+["The model to use"](#the-model-to-use).
+
+### Agents
+
+| Role | Purpose |
+|---|---|
+| `planner` | PRD → implementation plan + task list + approval decision |
+| `ui-ux-designer` | UI/UX spec for frontend/mobile work (conditional) |
+| `backend-developer` | Go, spec-first REST via `go-swagger` |
+| `frontend-developer` | Vue 3 SPA via Vite |
+| `mobile-developer` | React Native (Expo), conditional on mobile tasks |
+| `test-engineer` | component tests, Playwright e2e, Traefik gateway, docker-compose |
+| `build-gate` | deterministic compile/test/deploy gate — no LLM |
+| `security-reviewer` | SAST (gosec / govulncheck / `npm audit`) + LLM pass |
+| `code-reviewer` | [Kodus](https://kodus.io/) CLI + LLM summary |
+
+Each is defined entirely by a prompt file — see [Agent prompts](#agent-prompts).
+
+### Build agents
+
+The three developer agents are where a feature's actual code comes from. They
+share the same Go executor (`internal/agents/devagent`) and differ only in
+their prompt:
+
+- **`backend-developer`** — Go, spec-first REST via `go-swagger` (OpenAPI spec
+  in `api/`, generated server code, hand-written handlers), in-memory or
+  SQLite/GORM persistence, table-driven tests, multi-stage `Dockerfile`.
+- **`frontend-developer`** — Vue 3 (`<script setup>`) SPA, Vite build,
+  vue-router, optional Pinia, axios; multi-stage `Dockerfile` (or none if the
+  backend serves the SPA).
+- **`mobile-developer`** — React Native (TypeScript), Expo-managed; only runs
+  when tasks are tagged `mobile`; not deployed via Docker/compose.
+
+### Testing
+
+`test-engineer` writes the test suites and deployment glue right after the
+developers; `build-gate` then executes and gates on all of it, in this order:
+
+1. **Unit tests** — `go test ./...` (backend), `npm test` (frontend/mobile,
+   when a real test script exists).
+2. **Component/API tests** — a dependency-free Go program in `test/component/`,
+   one test per PRD acceptance criterion, run over HTTP through the generated
+   Traefik gateway (never hitting the app container directly).
+3. **E2E browser tests** — a Playwright (`@playwright/test`) suite in
+   `test/e2e/`, generated only when there's a browser-facing frontend; one test
+   per user-facing acceptance criterion, each taking a screenshot.
+4. **Deployment validation** — `docker compose config` validates the generated
+   `docker-compose.yml`, then a `docker-compose.test.yml` overlay runs a
+   `tester` service (the component + e2e suites) against the real stack behind
+   the gateway, tearing it down afterward.
+5. **SAST** — gosec, govulncheck, `npm audit` (`security-reviewer`), plus an LLM
+   pass judging real risk vs. PRD-scoped false positives.
+6. **AI code review** — the Kodus CLI against the diff, summarized by an LLM
+   pass (`code-reviewer`).
+
+The **Traefik gateway** is generated per feature by `test-engineer` (not part of
+the factory's own `docker-compose.yml`) as the app's single ingress: `/api/*`
+routes to the backend, everything else to the frontend if present. It's how
+both the component tests and the Playwright suite reach the running app, and
+it's what `build-gate` deploys and tears down for every component-test run.
 
 ### Web UI
 
@@ -150,7 +279,7 @@ make all        # gen + build_ui + build + test
 ### Containerised (whole factory)
 
 ```bash
-make up                 # build images + start catalog, coordinator, all 8 agents
+make up                 # build images + start catalog, coordinator, all 9 agents
                         # -> web UI at http://localhost:8090
 make kodus-up           # optional: self-hosted Kodus (then scripts/kodus-setup.md)
 
@@ -192,7 +321,7 @@ that PR re-enters the factory as another `request_changes` round.
 make demo               # reads ANTHROPIC_API_KEY from .env
 ```
 
-`scripts/demo.sh` starts the catalog + all eight agents + `coordinator serve`,
+`scripts/demo.sh` starts the catalog + all nine agents + `coordinator serve`,
 submits `docs/sample-prd.md` asynchronously, polls the run (auto-approving at the
 human gate), then prints the final status and the per-run workspace's log and
 file list.
@@ -228,14 +357,14 @@ curl -s -X PATCH localhost:8080/v1/agents/backend-developer/model \
 | `internal/factory/` | A2A message contracts + plan/verdict/routing helpers (`ParsePlan`, `RouteRole`, `VerdictFor`) shared by coordinator + agents |
 | `internal/workspace/` | per-run repositories: new / clone of a local repo / clone of a remote, branch pushed back (`Manager.Prepare`, `Repo`) |
 | `internal/forge/` | opens a GitHub PR for a pushed branch (`GITHUB_TOKEN`), and verifies + parses PR-review webhooks (`webhook.go`) |
-| `internal/buildgate/` | `go build`/`go test` + `npm run build` over the workspace → routed `Finding`s |
+| `internal/buildgate/` | `go build`/`go test` + `npm run build` + compose validate + component/e2e test run over the workspace → routed `Finding`s |
 | `internal/kodus/` | Kodus CLI wrapper |
 | `internal/sast/` | gosec / govulncheck / npm-audit wrappers |
-| `internal/agents/{devagent,uiux,secreview,codereview}/` | per-role executors |
+| `internal/agents/{devagent,uiux,secreview,codereview}/` | per-role executors — `devagent` is shared by `backend-developer`, `frontend-developer`, `mobile-developer` **and** `test-engineer` |
 | `internal/coordinator/` | the `Run` state machine + drive loop and event log (`coordinator.go`, `run.go`), stage sequencing (`plan.go`), A2A pipeline engine (`pipeline.go`), run store (`store.go`, `runstore/`), SPA serving (`ui/`) |
 | `browser/asf-ui/` | the Vue 3 SPA served by the coordinator |
 | `internal/prd/` | PRD type + Markdown/JSON parsing |
-| `cmd/agent-*` | the eight agent binaries (incl. `agent-build-gate`) |
+| `cmd/agent-*` | the nine agent binaries (incl. `agent-build-gate`, `agent-test-engineer`) |
 | `Dockerfile*`, `docker-compose.yml` | the containerised factory |
 | `scripts/kodus-setup.md` | one-time Kodus bootstrap |
 | `docs/ARCHITECTURE.md` | full target design, including later phases |
