@@ -32,7 +32,12 @@ func Review(ctx context.Context, dir, baseBranch string) ([]factory.Finding, err
 		}}, nil
 	}
 
-	args := []string{"review", "--agent", "--format", "json", "--no-fast"}
+	// No --no-fast: the flag was removed upstream (current CLI already does a
+	// full, non-fast review by default; --fast opts into the lighter mode).
+	// Passing it makes the CLI exit with "Unknown option" before ever reaching
+	// Kodus, so Review() would silently degrade to the unparseable-JSON path
+	// on every real call.
+	args := []string{"review", "--agent", "--format", "json"}
 	if baseBranch != "" {
 		args = append(args, "--branch", baseBranch)
 	}
