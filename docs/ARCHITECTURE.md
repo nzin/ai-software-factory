@@ -3,10 +3,11 @@
 ## Goal
 
 A human submits a **PRD**. A coordinator agent drives a set of specialized
-agents (planner, UI/UX designer, backend / frontend / mobile developer, security
-reviewer, code reviewer) to produce a feature as a **Pull Request** for human
-review. Agents communicate over the [A2A protocol](https://a2a-protocol.org/)
-(`github.com/a2aproject/a2a-go`). Everything is Go.
+agents (planner, UI/UX designer, backend / frontend / mobile developer, test
+engineer, build gate, security reviewer, code reviewer) to produce a feature as
+a **Pull Request** for human review. Agents communicate over the
+[A2A protocol](https://a2a-protocol.org/) (`github.com/a2aproject/a2a-go`).
+Everything is Go.
 
 ## Components
 
@@ -82,8 +83,8 @@ stage order in `plan.go`, A2A dispatch in `pipeline.go`):
 
 ```
 planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mobile}?
-  → build-gate → security-reviewer → code-reviewer   (request_changes / build_failed
-                                                       ↺ back to a developer)
+  → test-engineer? → build-gate → security-reviewer → code-reviewer
+                      (request_changes / build_failed ↺ back to a developer)
 ```
 
 - The **planner** is handed a repository snapshot (a new/empty marker, or a
@@ -102,13 +103,38 @@ planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mo
   the UI spec, their tasks, and — on a fix pass — the `Findings` + `Attempt`
   count. They write whole files, `git commit`, and return a
   `factory.ResultEnvelope`.
+- **test-engineer** (`agent-test-engineer`, shares `internal/agents/devagent`'s
+  executor — only its prompt, `agent_prompts/test-engineer.md`, differs) runs
+  once after the developers, when at least one ran. It writes into the
+  workspace: a component/API test suite (`test/component/`, a dependency-free
+  Go program, one test per PRD acceptance criterion), a Playwright e2e suite
+  (`test/e2e/`, `@playwright/test`, only when there's a browser-facing
+  frontend, one test per user-facing acceptance criterion, screenshotting to a
+  fixed `/output/screenshots/` path), a per-feature **Traefik gateway**
+  (`gateway/`, `traefik:v3.x`, file-provider `dynamic.yml` — never the Docker
+  provider, so it needs no Docker socket) as the app's single ingress
+  (`/api/*` → backend, else → frontend), and the deployment glue: the root
+  `docker-compose.yml` (`app` / `frontend` get healthchecks, no host port
+  mappings — only `gateway` is externally reachable) plus a
+  `docker-compose.test.yml` overlay adding one `tester` service that runs both
+  suites against `http://gateway` and exits non-zero on any failure.
 - **build-gate** (`internal/buildgate`, `agent-build-gate`, no LLM) compiles and
   tests the workspace — `go build ./...` / `go test ./...` and `npm install` /
   `npm run build` — and turns any non-zero exit into a `high`
   `Finding{source:"build-gate"}` routed by file path. A missing toolchain is an
-  `info` finding, never a failure. It needs current Go + Node, so it ships its
-  own `Dockerfile.buildgate` (Go 1.26 + Node 22) rather than reusing
-  `security-reviewer`'s stale Debian toolchains.
+  `info` finding, never a failure. When those pass and the workspace has a
+  `docker-compose.test.yml` (i.e. test-engineer ran), it also validates
+  `docker compose config` and then runs `checkComponent`: brings up the full
+  stack plus the `tester` overlay under a per-run compose project name with
+  `GATEWAY_PORT=0` (an ephemeral host port, so concurrent runs' gateways never
+  collide), waits for `tester` to exit, `docker cp`'s out any Playwright
+  screenshots into `test/e2e/screenshots`, tears the stack down unconditionally,
+  and folds the `PASS`/`FAIL [api]`/`[e2e]` counts into the check summary (e.g.
+  "api 8/8 passed, e2e 5/5 passed, 3 screenshot(s) captured"). It needs current
+  Go + Node + a Docker CLI with the compose plugin against the **host Docker
+  daemon** (mounted socket) to drive that nested `docker compose`, so it ships
+  its own `Dockerfile.buildgate` (Go 1.26 + Node 22 + Docker CLI) rather than
+  reusing `security-reviewer`'s stale Debian toolchain.
 - **security-reviewer** runs `internal/sast` over the workspace plus one LLM pass
   over the diff; **code-reviewer** runs the Kodus CLI. Each returns a `Verdict`
   (`approve` | `request_changes`, derived from finding severity by
@@ -180,7 +206,7 @@ finds an issue → back to the developer → back to the reviewer" is a cycle. T
 happy-path order is just the default transition table:
 
 ```
-planner → ui-ux-designer → { backend, frontend, mobile } → build-gate → security-reviewer → code-reviewer → PR
+planner → ui-ux-designer → { backend, frontend, mobile } → test-engineer → build-gate → security-reviewer → code-reviewer → PR
 ```
 
 The build gate and the reviewers return a structured verdict — `approve` or
