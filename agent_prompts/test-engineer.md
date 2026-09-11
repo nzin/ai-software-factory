@@ -86,8 +86,18 @@ against the app **through the gateway**:
   in-container path**, `/output/screenshots/<test-name>.png` — the build gate
   extracts this exact path, so don't change it.
 - print `PASS [e2e] <name>` / `FAIL [e2e] <name>: <why>` for each test.
-- base the test image on `mcr.microsoft.com/playwright:v1.4x-jammy` (browsers
-  preinstalled) so the container doesn't download browsers on every run.
+- pick **one concrete Playwright version** (`x.y.z`, never a wildcard like
+  `1.4x` or a caret/tilde range) and use that **exact same version string in
+  both places**: the npm dependency, pinned exact
+  (`npm install --save-exact @playwright/test@x.y.z`, so `package.json` reads
+  `"@playwright/test": "x.y.z"`), and the test image's base image tag,
+  `mcr.microsoft.com/playwright:vx.y.z-jammy` (browsers preinstalled, so the
+  container doesn't download browsers on every run). These two **must**
+  match exactly — the base image's preinstalled browser binaries are
+  version-locked to that exact `@playwright/test` release, and even a
+  patch-level mismatch (e.g. npm resolving to a newer version than the base
+  image ships) makes `browserType.launch()` fail at test time with a missing
+  browser binary.
 
 If there is no browser-facing frontend, skip this section entirely — do not
 invent one.
@@ -113,6 +123,12 @@ services:
 The `tester` image's entrypoint runs the Go suite, then the Playwright suite
 (when present), and exits non-zero if either failed — combine both suites'
 stdout so both `[api]` and `[e2e]` lines show up together in one log.
+
+When `test/e2e/` exists, its own Dockerfile already pins
+`mcr.microsoft.com/playwright:vx.y.z-jammy` with matching browsers baked in
+(§4) — don't add a separate `npm install`/`playwright install` step for
+browsers in the `tester` build; that would resolve its own, possibly
+different, Playwright version and reintroduce the same mismatch.
 
 ## 6. A Makefile target
 
