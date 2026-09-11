@@ -710,6 +710,28 @@ func TestDeleteRun(t *testing.T) {
 	}
 }
 
+func TestDeleteRunAccepted(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil))
+	o.store.Put(&Run{ID: "r1", Status: StatusAccepted})
+	if err := o.Delete(context.Background(), "r1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := o.Get("r1"); ok {
+		t.Fatal("run still present after delete")
+	}
+}
+
+func TestDeleteRunDone(t *testing.T) {
+	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil))
+	o.store.Put(&Run{ID: "r1", Status: StatusDone})
+	if err := o.Delete(context.Background(), "r1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := o.Get("r1"); ok {
+		t.Fatal("run still present after delete")
+	}
+}
+
 func TestDeleteRunRejectsNonTerminal(t *testing.T) {
 	o := New(nil, WithEngine(failsOnBackend{}), WithWorkspace(nil))
 	o.store.Put(&Run{ID: "r1", Status: StatusRunning})

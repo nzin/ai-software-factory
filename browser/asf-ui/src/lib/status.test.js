@@ -34,6 +34,13 @@ describe('columnFor', () => {
   it('returns null for an unknown status', () => {
     expect(columnFor('banana')).toBeNull()
   })
+
+  it('puts every closed status (delete-eligible) in the closed column', () => {
+    expect(columnFor('accepted')).toBe('closed')
+    expect(columnFor('done')).toBe('closed')
+    expect(columnFor('failed')).toBe('closed')
+    expect(columnFor('running')).not.toBe('closed')
+  })
 })
 
 describe('groupByColumn', () => {

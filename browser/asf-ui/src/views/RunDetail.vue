@@ -11,7 +11,7 @@ import RevisionList from '@/components/RevisionList.vue'
 import StageCard from '@/components/StageCard.vue'
 import FindingsTable from '@/components/FindingsTable.vue'
 import MarkdownBlock from '@/components/MarkdownBlock.vue'
-import { DEVELOPER_ROLES, fmtRelative, isTerminal, statusLabel } from '@/lib/status'
+import { DEVELOPER_ROLES, columnFor, fmtRelative, isTerminal, statusLabel } from '@/lib/status'
 
 const route = useRoute()
 const router = useRouter()
@@ -30,7 +30,7 @@ const canApprove = computed(() => run.value.status === 'awaiting_approval')
 const canResume = computed(() => ['needs_human_review', 'failed'].includes(run.value.status))
 const canReview = computed(() => ['pr_ready', 'pr_open'].includes(run.value.status))
 const isFailed = computed(() => run.value.status === 'failed')
-const canDelete = computed(() => run.value.status === 'failed')
+const canDelete = computed(() => columnFor(run.value.status) === 'closed')
 
 // Show the revisions tab once there is a PR or more than one branch-ready cycle.
 const showRevisions = computed(() => {
