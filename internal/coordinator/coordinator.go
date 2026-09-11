@@ -69,6 +69,7 @@ type Orchestrator struct {
 
 	mu      sync.Mutex
 	driving map[string]bool // runs with a live drive goroutine
+	pending map[string]bool // a start() arrived for this run while its drive goroutine was finishing — replay it
 }
 
 // Option configures an Orchestrator.
@@ -107,6 +108,7 @@ func New(catalog *agentkit.CatalogClient, opts ...Option) *Orchestrator {
 		baseBranch:      DefaultBaseBranch,
 		pruneKeep:       50,
 		driving:         make(map[string]bool),
+		pending:         make(map[string]bool),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -471,6 +473,21 @@ const (
 // terminal; requesting changes turns each comment into a human Finding and
 // sends the run back through the factory.
 func (o *Orchestrator) Review(ctx context.Context, id, decision string, comments []ReviewComment) (*Run, error) {
+	return o.review(ctx, id, decision, comments, "")
+}
+
+// review is Review's implementation. via, when non-empty, is folded into the
+// request_changes event's detail inside the same critical section that
+// persists the run and launches start() — not applied afterward by reading
+// Review's return value, mutating it, and Put-ing it back (which is how
+// IngestPRReview used to attribute a review to the GitHub webhook). That
+// trailing Put raced the drive() goroutine start() had just launched: it
+// reads a snapshot taken essentially the instant start() returns, so on a
+// fast (or fake, in tests) pipeline that goroutine can run to completion and
+// clear its own bookkeeping before the trailing Put executes — which then
+// clobbers the finished run back to that stale pre-drive snapshot, stranding
+// it with no goroutine left to drive it further.
+func (o *Orchestrator) review(ctx context.Context, id, decision string, comments []ReviewComment, via string) (*Run, error) {
 	run, ok, _ := o.store.Get(id)
 	if !ok {
 		return nil, fmt.Errorf("coordinator: no run %s", id)
@@ -543,10 +560,14 @@ func (o *Orchestrator) Review(ctx context.Context, id, decision string, comments
 		run.Stage = target
 		run.Reason = ""
 		run.UpdatedAt = time.Now().UTC()
+		detail := renderComments(fresh)
+		if via != "" {
+			detail = via + "\n\n" + detail
+		}
 		o.event(run, EventReviewChanges, target,
 			"human requested changes (%d comments) → back to %s (attempt %d)",
 			len(fresh), target, run.Attempts[target]).
-			By(ActorHuman).WithDetail(renderComments(fresh))
+			By(ActorHuman).WithDetail(detail)
 		_ = o.store.Put(run)
 		o.start(run)
 		if r, ok, _ := o.store.Get(run.ID); ok {
@@ -592,15 +613,7 @@ func (o *Orchestrator) IngestPRReview(ctx context.Context, r forge.PRReview) (*R
 		_ = o.store.Put(run)
 		return run, nil
 	}
-	res, err := o.Review(ctx, run.ID, ReviewRequestChanges, comments)
-	if err == nil {
-		// annotate the event Review just wrote so the timeline shows the source
-		if n := len(res.Events); n > 0 {
-			res.Events[n-1].Detail = "via GitHub PR review by " + orDash(r.Author) + "\n\n" + res.Events[n-1].Detail
-			_ = o.store.Put(res)
-		}
-	}
-	return res, err
+	return o.review(ctx, run.ID, ReviewRequestChanges, comments, "via GitHub PR review by "+orDash(r.Author))
 }
 
 // matchPR finds the run this PR event belongs to: exact PR URL first, then the
@@ -651,24 +664,57 @@ func (o *Orchestrator) unfreeze(run *Run) {
 	run.PausedAt = time.Time{}
 }
 
-// start launches drive() in the background unless one is already running.
+// start launches drive() in the background unless one is already running, in
+// which case the request is coalesced rather than dropped: the in-flight
+// goroutine notices and replays drive() once it finishes.
+//
+// This matters because a caller (Review/Approve/Reject/Resume) reads a run
+// from the store, mutates it, persists it, and calls start() — but the
+// *previous* drive() goroutine for that run may have already made that exact
+// persisted state visible (e.g. drive's stop() calls store.Put with a terminal
+// status) and merely be in the middle of returning, with driving[id] not yet
+// cleared. A plain "no-op if driving[id]" guard would silently strand the run
+// in that window; coalescing via pending[id] closes it.
 func (o *Orchestrator) start(run *Run) {
 	o.mu.Lock()
 	if o.driving[run.ID] {
+		o.pending[run.ID] = true
 		o.mu.Unlock()
 		return
 	}
 	o.driving[run.ID] = true
 	o.mu.Unlock()
 
-	go func() {
-		defer func() {
+	go o.driveLoop(run)
+}
+
+// driveLoop runs drive() and, if a start() request was coalesced while it ran,
+// re-fetches the run's latest persisted state (the coalesced caller's own
+// mutations live only in *their* copy, since the store hands out independent
+// snapshots) and drives it again — repeating until a pass finishes with no new
+// request pending.
+func (o *Orchestrator) driveLoop(run *Run) {
+	for {
+		o.drive(context.Background(), run)
+
+		o.mu.Lock()
+		if !o.pending[run.ID] {
+			delete(o.driving, run.ID)
+			o.mu.Unlock()
+			return
+		}
+		delete(o.pending, run.ID)
+		o.mu.Unlock()
+
+		r, ok, _ := o.store.Get(run.ID)
+		if !ok {
 			o.mu.Lock()
 			delete(o.driving, run.ID)
 			o.mu.Unlock()
-		}()
-		o.drive(context.Background(), run)
-	}()
+			return
+		}
+		run = r
+	}
 }
 
 // drive is the run state machine. It returns when the run pauses (awaiting

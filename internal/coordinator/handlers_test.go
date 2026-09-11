@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-openapi/loads"
@@ -23,12 +24,14 @@ import (
 	"github.com/nzin/ai-software-factory/internal/prd"
 )
 
-// fakeCatalog stands in for the real catalog service.
+// fakeCatalog stands in for the real catalog service. GetAgentDetail is
+// called concurrently by ListAgents' fan-out (handlers.go), so gets must be
+// an atomic counter, not a plain int.
 type fakeCatalog struct {
 	agents  []agentkit.AgentInfo
 	listErr error
 	getErr  error
-	gets    int
+	gets    atomic.Int32
 }
 
 func (f *fakeCatalog) ListAgents(context.Context) ([]agentkit.AgentInfo, error) {
@@ -36,7 +39,7 @@ func (f *fakeCatalog) ListAgents(context.Context) ([]agentkit.AgentInfo, error) 
 }
 
 func (f *fakeCatalog) GetAgentDetail(_ context.Context, role string) (*agentkit.AgentDetail, error) {
-	f.gets++
+	f.gets.Add(1)
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -112,8 +115,8 @@ func TestListAgentsReadsThroughToTheCatalog(t *testing.T) {
 	if model["model"] != "claude-sonnet-5" {
 		t.Fatalf("model not filled in by the fan-out: %+v", got[0])
 	}
-	if cat.gets != 2 {
-		t.Fatalf("fan-out made %d detail calls, want 2", cat.gets)
+	if cat.gets.Load() != 2 {
+		t.Fatalf("fan-out made %d detail calls, want 2", cat.gets.Load())
 	}
 }
 
