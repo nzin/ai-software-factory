@@ -2,8 +2,9 @@
 #
 #   make up          # build + start the factory
 #   make kodus-up    # start the self-hosted Kodus stack (separate compose, see
-#                    # scripts/kodus-setup.md); the code-reviewer reaches its API
-#                    # via KODUS_API_URL (default http://host.docker.internal:3001)
+#                    # scripts/kodus-setup.md) plus kodus-tls-proxy; the
+#                    # code-reviewer reaches its API via KODUS_API_URL (default
+#                    # https://kodus-tls-proxy:3443)
 #
 # Requires ANTHROPIC_API_KEY in .env (see .env.example).
 #
@@ -129,19 +130,44 @@ services:
       dockerfile: Dockerfile.codereview
     image: ai-software-factory-codereview:latest
     command: ["/app/bin/agent-code-reviewer", "--addr", ":9107", "--public-url", "http://agent-code-reviewer:9107"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    networks: [factory-net, kodus-backend-services]
+    volumes:
+      - factory-workspace:/workspace
+      - ./.kodus-tls/kodus-tls-proxy.crt:/etc/kodus-tls/ca.crt:ro
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?}
       ASF_CATALOG_URL: http://catalog:8080
       ASF_WORKSPACE_ROOT: /workspace
-      # Self-hosted Kodus API (started separately via `make kodus-up`).
-      KODUS_API_URL: ${KODUS_API_URL:-http://host.docker.internal:3001}
+      # Self-hosted Kodus API, reached through kodus-tls-proxy (started
+      # separately via `make kodus-up`): the Kodus CLI refuses a non-localhost
+      # KODUS_API_URL unless it's HTTPS, silently falling back to the public
+      # api.kodus.io otherwise. NODE_EXTRA_CA_CERTS trusts the proxy's
+      # self-signed cert (see scripts/kodus-tls-cert.sh).
+      KODUS_API_URL: ${KODUS_API_URL:-https://kodus-tls-proxy:3443}
       KODUS_TEAM_KEY: ${KODUS_TEAM_KEY:-}
+      NODE_EXTRA_CA_CERTS: /etc/kodus-tls/ca.crt
+
+  # TLS termination in front of the self-hosted Kodus API (see
+  # docker/kodus-tls-proxy.conf and scripts/kodus-tls-cert.sh). Brought up by
+  # `make kodus-up`, not `make up` — it has nothing to proxy to until the
+  # separate Kodus stack is running.
+  kodus-tls-proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks: [kodus-backend-services]
+    ports: ["3443:3443"]
+    volumes:
+      - ./.kodus-tls/kodus-tls-proxy.crt:/etc/nginx/certs/kodus-tls-proxy.crt:ro
+      - ./.kodus-tls/kodus-tls-proxy.key:/etc/nginx/certs/kodus-tls-proxy.key:ro
+      - ./docker/kodus-tls-proxy.conf:/etc/nginx/conf.d/default.conf:ro
 
 networks:
   factory-net:
     name: factory-net
+  # Created by `make kodus-up` (docker network create) so kodus-tls-proxy and
+  # agent-code-reviewer can reach the self-hosted kodus_api by container name.
+  kodus-backend-services:
+    external: true
 
 volumes:
   factory-workspace:

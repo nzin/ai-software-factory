@@ -124,16 +124,23 @@ kodus-up:
 	@for n in shared-network monitoring-network kodus-backend-services; do docker network create $$n 2>/dev/null || true; done
 	@cd $(KODUS_DIR) && docker compose up -d
 	@echo "Kodus API: http://localhost:3001   web: http://localhost:3000"
+	@bash scripts/kodus-tls-cert.sh
+	@docker compose up -d kodus-tls-proxy
 	@$(MAKE) --no-print-directory kodus-bootstrap
 
 ## kodus-bootstrap: create the first org/user via the Kodus API, inject the
 ## Anthropic key as a BYOK provider, and write KODUS_TEAM_KEY into .env.
 ## No web login required. Safe to re-run.
+##
+## KODUS_API_URL is what gets written into .env for the containerised
+## code-reviewer: the Kodus CLI rejects a non-localhost, non-HTTPS API URL, so
+## this must be the kodus-tls-proxy address, not kodus_api's own host port.
 kodus-bootstrap:
-	@bash scripts/kodus-bootstrap.sh
+	@KODUS_API_URL=https://kodus-tls-proxy:3443 bash scripts/kodus-bootstrap.sh
 
 kodus-down:
 	@cd $(KODUS_DIR) && docker compose down
+	@docker compose stop kodus-tls-proxy 2>/dev/null || true
 
 ## clean: remove build output (keeps ./local_git — use `make reset-workspace` for that)
 clean:

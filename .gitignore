@@ -11,6 +11,7 @@ coverage.txt
 /workspace/
 /local_git/
 /.kodus/
+/.kodus-tls/
 
 # local secrets / scratch (never commit)
 anthropic_api_key

@@ -21,7 +21,9 @@ That is the whole setup. `make kodus-up`:
    lines (see below);
 2. runs the installer's `docker compose up -d` (API on
    `http://localhost:3001`, web UI on `http://localhost:3000`);
-3. runs `make kodus-bootstrap`, which creates the first org/user, injects your
+3. generates a self-signed cert (`scripts/kodus-tls-cert.sh`, into `.kodus-tls/`,
+   git-ignored) and starts `kodus-tls-proxy` — see "HTTPS proxy" below;
+4. runs `make kodus-bootstrap`, which creates the first org/user, injects your
    Anthropic key as a BYOK provider, mints a team key, and writes
    `KODUS_TEAM_KEY` + `KODUS_API_URL` into this repo's `.env` — **no web login
    page**.
@@ -74,13 +76,23 @@ block explains why: `development`/`test` emit the SSO handoff cookie without the
 `Secure`/`Domain` attributes). There is no "disable auth" flag in Kodus; the
 bootstrap script is the supported way to skip the login page.
 
+## HTTPS proxy (`kodus-tls-proxy`)
+
+The Kodus CLI refuses a non-`localhost` `KODUS_API_URL` unless it's HTTPS — a
+plain `http://host.docker.internal:3001` is rejected and the CLI **silently
+falls back to the public `api.kodus.io`**, sending your diff to Kodus's cloud
+instead of your self-hosted instance (no hard error; the JSON output still
+looks like a normal successful review).
+
+`kodus-tls-proxy` (an `nginx:alpine` service in `docker-compose.yml`, terminating
+TLS with the self-signed cert `scripts/kodus-tls-cert.sh` generates into
+`.kodus-tls/`) sits in front of `kodus_api` so `agent-code-reviewer` can reach it
+at `https://kodus-tls-proxy:3443`. `agent-code-reviewer` trusts the proxy's cert
+via `NODE_EXTRA_CA_CERTS` (mounted read-only from `.kodus-tls/`). `make kodus-up`
+sets all of this up; nothing to do manually.
+
 ## Known rough edges
 
-- **HTTPS check:** the Kodus CLI wants HTTPS for a non-`localhost`
-  `KODUS_API_URL`. `http://host.docker.internal:3001` may be rejected. If so:
-  run the code-reviewer on the host instead of in a container (it then uses
-  `http://localhost:3001`), or put a TLS-terminating proxy in front of
-  `kodus-api`.
 - **Version drift:** `kodus-installer`'s compose and `.env` schema change over
   time. If `make kodus-up` fails, follow the installer's own README in `.kodus/`.
   If the bootstrap script's endpoints 404, check the API's OpenAPI at
