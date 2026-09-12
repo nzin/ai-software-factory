@@ -32,7 +32,7 @@ type SubmitPRDRequest struct {
 	// prd
 	Prd *PRD `json:"prd,omitempty"`
 
-	// target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).
+	// target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). A name with no path separators (e.g. "demo") resolves to, and auto-creates on first use, <local-git-root>/<name> — then behaves like an existing local repo. https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).
 	//
 	RepoURL string `json:"repoURL,omitempty"`
 }

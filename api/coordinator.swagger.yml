@@ -113,6 +113,39 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /v1/runs/{id}/screenshot:
+    get:
+      tags: [runs]
+      operationId: getRunScreenshot
+      summary: Fetch a Playwright screenshot written during the run, by its repo-relative path
+      description: >
+        `path` must be one of the run's recorded filesWritten entries under
+        test/e2e/screenshots/ — anything else is rejected.
+      produces:
+        - image/png
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+        - name: path
+          in: query
+          required: true
+          type: string
+      responses:
+        200:
+          description: the screenshot
+          schema:
+            type: file
+        400:
+          description: invalid path
+          schema:
+            $ref: "#/definitions/Error"
+        404:
+          description: no such run or file
+          schema:
+            $ref: "#/definitions/Error"
+
   /v1/runs/{id}/approve:
     post:
       tags: [runs]

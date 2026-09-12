@@ -14,6 +14,7 @@
 //	  - application/json
 //
 //	Produces:
+//	  - image/png
 //	  - application/json
 //
 // swagger:meta

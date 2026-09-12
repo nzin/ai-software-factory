@@ -2,12 +2,18 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
@@ -85,6 +91,59 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 			return runs.NewGetRunNotFound().WithPayload(&models.Error{Message: swag.String("no such run")})
 		}
 		return runs.NewGetRunOK().WithPayload(runToAPI(r))
+	})
+
+	api.RunsGetRunScreenshotHandler = runs.GetRunScreenshotHandlerFunc(func(p runs.GetRunScreenshotParams) middleware.Responder {
+		// The operation's produces list is scoped to image/png for the 200 path;
+		// write error bodies directly instead of going through the negotiated
+		// producer, which would otherwise try to run a models.Error through the
+		// byte-stream producer picked for image/png.
+		jsonErr := func(status int, msg string) middleware.Responder {
+			return middleware.ResponderFunc(func(rw http.ResponseWriter, _ runtime.Producer) {
+				rw.Header().Set("Content-Type", "application/json")
+				rw.WriteHeader(status)
+				_ = json.NewEncoder(rw).Encode(&models.Error{Message: swag.String(msg)})
+			})
+		}
+		bad := func(msg string) middleware.Responder { return jsonErr(http.StatusBadRequest, msg) }
+		notFound := func(msg string) middleware.Responder { return jsonErr(http.StatusNotFound, msg) }
+
+		r, ok := o.Get(p.ID)
+		if !ok {
+			return notFound("no such run")
+		}
+		if r.WorkspaceDir == "" {
+			return notFound("run has no workspace")
+		}
+
+		const screenshotPrefix = "test/e2e/screenshots/"
+		reqPath := filepath.Clean(p.Path)
+		if reqPath != p.Path || !strings.HasPrefix(reqPath, screenshotPrefix) || filepath.Ext(reqPath) != ".png" {
+			return bad("path must be a clean path under " + screenshotPrefix + " ending in .png")
+		}
+
+		var known bool
+		for _, t := range r.Tasks {
+			if slices.Contains(t.FilesWritten, reqPath) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return notFound("no such screenshot on this run")
+		}
+
+		abs, err := filepath.Abs(filepath.Join(r.WorkspaceDir, reqPath))
+		root, rootErr := filepath.Abs(r.WorkspaceDir)
+		if err != nil || rootErr != nil || (abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator))) {
+			return bad("invalid path")
+		}
+
+		f, err := os.Open(abs)
+		if err != nil {
+			return notFound("screenshot not found on disk")
+		}
+		return runs.NewGetRunScreenshotOK().WithPayload(f)
 	})
 
 	api.RunsDeleteRunHandler = runs.DeleteRunHandlerFunc(func(p runs.DeleteRunParams) middleware.Responder {

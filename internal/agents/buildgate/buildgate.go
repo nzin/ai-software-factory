@@ -7,6 +7,7 @@ package buildgate
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -15,6 +16,7 @@ import (
 	bg "github.com/nzin/ai-software-factory/internal/buildgate"
 	"github.com/nzin/ai-software-factory/internal/factory"
 	"github.com/nzin/ai-software-factory/internal/llm"
+	"github.com/nzin/ai-software-factory/internal/testharness"
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
@@ -48,6 +50,8 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 		}
 		repo.BaseBranch = env.BaseBranch
 
+		commitSHA, filesWritten := refreshHarness(ctx, repo, env.Stage)
+
 		changed, _ := repo.ChangedFiles(ctx)
 		res := bg.Check(ctx, env.RunID, repo.Dir, changed)
 		findings := res.Findings
@@ -64,13 +68,11 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			}
 		}
 
-		var commitSHA string
-		var filesWritten []string
 		if len(res.Screenshots) > 0 {
 			if err := repo.AddPaths(ctx, res.Screenshots); err == nil {
 				if sha, err := repo.Commit(ctx, env.Stage, "attach e2e screenshots"); err == nil && sha != "" {
 					commitSHA = sha
-					filesWritten = res.Screenshots
+					filesWritten = append(filesWritten, res.Screenshots...)
 				}
 			}
 		}
@@ -85,6 +87,30 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			FilesWritten: filesWritten,
 		}, nil
 	})
+}
+
+// refreshHarness re-lays the factory-owned test harness before the checks run,
+// so a developer fix pass that edited one of its files can't break the
+// component run, and commits the refresh so later fix passes see it. It is
+// best-effort: on any error the gate still checks what is there.
+func refreshHarness(ctx context.Context, repo *workspace.Repo, stage string) (sha string, written []string) {
+	written, removed, err := testharness.Materialize(repo.Dir)
+	if err != nil {
+		log.Printf("build-gate: refresh test harness: %v", err)
+		return "", nil
+	}
+	if len(written)+len(removed) == 0 {
+		return "", nil
+	}
+	if err := repo.AddPaths(ctx, written); err != nil {
+		log.Printf("build-gate: stage test harness: %v", err)
+		return "", nil
+	}
+	if sha, err = repo.Commit(ctx, stage, "refresh factory-owned test harness"); err != nil {
+		log.Printf("build-gate: commit test harness: %v", err)
+		return "", nil
+	}
+	return sha, written
 }
 
 // completer is the slice of *llm.Client tighten needs (so it can be stubbed).

@@ -389,6 +389,53 @@ func init() {
         }
       }
     },
+    "/v1/runs/{id}/screenshot": {
+      "get": {
+        "description": "` + "`" + `path` + "`" + ` must be one of the run's recorded filesWritten entries under test/e2e/screenshots/ — anything else is rejected.\n",
+        "produces": [
+          "image/png"
+        ],
+        "tags": [
+          "runs"
+        ],
+        "summary": "Fetch a Playwright screenshot written during the run, by its repo-relative path",
+        "operationId": "getRunScreenshot",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "path",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the screenshot",
+            "schema": {
+              "type": "file"
+            }
+          },
+          "400": {
+            "description": "invalid path",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "404": {
+            "description": "no such run or file",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/webhooks/github": {
       "post": {
         "description": "Verifies the X-Hub-Signature-256 HMAC, then turns a PR review or an inline review comment into the same re-entry the in-UI review does: a change request becomes a Finding{source:\"human\"} routed to the responsible developer; an approval accepts the run. There is no request body schema here on purpose — the handler reads the raw body itself for signature verification.\n",
@@ -935,7 +982,7 @@ func init() {
           "$ref": "#/definitions/PRD"
         },
         "repoURL": {
-          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). A name with no path separators (e.g. \"demo\") resolves to, and auto-creates on first use, \u003clocal-git-root\u003e/\u003cname\u003e — then behaves like an existing local repo. https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
           "type": "string"
         }
       }
@@ -1368,6 +1415,53 @@ func init() {
         }
       }
     },
+    "/v1/runs/{id}/screenshot": {
+      "get": {
+        "description": "` + "`" + `path` + "`" + ` must be one of the run's recorded filesWritten entries under test/e2e/screenshots/ — anything else is rejected.\n",
+        "produces": [
+          "image/png"
+        ],
+        "tags": [
+          "runs"
+        ],
+        "summary": "Fetch a Playwright screenshot written during the run, by its repo-relative path",
+        "operationId": "getRunScreenshot",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "path",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the screenshot",
+            "schema": {
+              "type": "file"
+            }
+          },
+          "400": {
+            "description": "invalid path",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "404": {
+            "description": "no such run or file",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/webhooks/github": {
       "post": {
         "description": "Verifies the X-Hub-Signature-256 HMAC, then turns a PR review or an inline review comment into the same re-entry the in-UI review does: a change request becomes a Finding{source:\"human\"} routed to the responsible developer; an approval accepts the run. There is no request body schema here on purpose — the handler reads the raw body itself for signature verification.\n",
@@ -1914,7 +2008,7 @@ func init() {
           "$ref": "#/definitions/PRD"
         },
         "repoURL": {
-          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
+          "description": "target repository. Empty = a new local repo. file:///abs/path or a bare path = an existing local repo (cloned from; branch pushed back). A name with no path separators (e.g. \"demo\") resolves to, and auto-creates on first use, \u003clocal-git-root\u003e/\u003cname\u003e — then behaves like an existing local repo. https/git/ssh URL = a remote repo (cloned; branch pushed + PR opened if GITHUB_TOKEN is set).\n",
           "type": "string"
         }
       }

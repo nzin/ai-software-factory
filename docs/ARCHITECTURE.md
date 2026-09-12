@@ -105,29 +105,48 @@ planner → [human approval gate] → ui-ux-designer? → {backend, frontend, mo
   `factory.ResultEnvelope`.
 - **test-engineer** (`agent-test-engineer`, shares `internal/agents/devagent`'s
   executor — only its prompt, `agent_prompts/test-engineer.md`, differs) runs
-  once after the developers, when at least one ran. It writes into the
-  workspace: a component/API test suite (`test/component/`, a dependency-free
-  Go program, one test per PRD acceptance criterion), a Playwright e2e suite
-  (`test/e2e/`, `@playwright/test`, only when there's a browser-facing
-  frontend, one test per user-facing acceptance criterion, screenshotting to a
-  fixed `/output/screenshots/` path), a per-feature **Traefik gateway**
-  (`gateway/`, `traefik:v3.x`, file-provider `dynamic.yml` — never the Docker
-  provider, so it needs no Docker socket) as the app's single ingress
-  (`/api/*` → backend, else → frontend), and the deployment glue: the root
+  once after the developers, when at least one ran. The model writes the test
+  *code* and the PRD-specific deployment: a component/API test suite
+  (`test/component/main.go`, a dependency-free Go program, one test per PRD
+  acceptance criterion), Playwright specs (`test/e2e/*.spec.ts`, only when
+  there's a browser-facing frontend, one test per user-facing acceptance
+  criterion, screenshotting to a fixed `/output/screenshots/` path), a
+  per-feature **Traefik gateway** (`gateway/`, `traefik:v3.x`, file-provider
+  `dynamic.yml` — never the Docker provider, so it needs no Docker socket) as
+  the app's single ingress (`/api/*` → backend, else → frontend), and the root
   `docker-compose.yml` (`app` / `frontend` get healthchecks, no host port
-  mappings — only `gateway` is externally reachable) plus a
-  `docker-compose.test.yml` overlay adding one `tester` service that runs both
-  suites against `http://gateway` and exits non-zero on any failure.
-- **build-gate** (`internal/buildgate`, `agent-build-gate`, no LLM) compiles and
-  tests the workspace — `go build ./...` / `go test ./...` and `npm install` /
-  `npm run build` — and turns any non-zero exit into a `high`
-  `Finding{source:"build-gate"}` routed by file path. A missing toolchain is an
-  `info` finding, never a failure. When those pass and the workspace has a
-  `docker-compose.test.yml` (i.e. test-engineer ran), it also validates
-  `docker compose config` and then runs `checkComponent`: brings up the full
-  stack plus the `tester` overlay under a per-run compose project name with
+  mappings — only `gateway` is externally reachable). Everything identical
+  from one PRD to the next is the **factory-owned test harness**
+  (`internal/testharness`), laid down by a devagent post-write hook in the same
+  commit and overwriting whatever the model wrote at those paths: the one
+  `tester` image (`test/Dockerfile`, build context `./test` so it sees both
+  suites — a Go build stage plus `alpine`, or plus
+  `mcr.microsoft.com/playwright:v<PlaywrightVersion>-noble` when there are
+  specs) and its `test/run.sh` entrypoint, `test/component/go.mod`, the e2e
+  `package.json` pinned to exactly `PlaywrightVersion` (the image's browsers
+  are locked to it), a `playwright.config.ts` and a reporter printing the
+  `PASS`/`FAIL [e2e]` lines, and the `docker-compose.test.yml` overlay adding
+  one `tester` service that runs both suites against `http://gateway` and
+  exits non-zero on any failure.
+- **build-gate** (`internal/buildgate`, `agent-build-gate`, no LLM) first
+  re-lays the test harness (`testharness.Materialize`, committed when a fix
+  pass had touched it), then compiles and tests the workspace — `go build ./...`
+  / `go test ./...` and `npm install` / `npm run build` — and turns any
+  non-zero exit into a `high` `Finding{source:"build-gate"}` routed by file
+  path. A missing toolchain is an `info` finding, never a failure. For a
+  runnable service it validates `docker compose config` and runs a pure-Go
+  deploy lint (`lint.go`): every service's Dockerfile exists and never
+  `COPY`/`ADD`s from outside its build context (anchored at the Dockerfile
+  line), and — with the test overlay — there is a `gateway` with a healthcheck
+  and a `${GATEWAY_PORT}` host port. When all that passes and the workspace has
+  a `docker-compose.test.yml` (i.e. test-engineer ran), `checkComponent`
+  **builds** every image (`docker compose build`; a failure is a `stack build`
+  finding on the failing service's Dockerfile), then **runs** the stack plus the
+  `tester` overlay (`up --no-build`) under a per-run compose project name with
   `GATEWAY_PORT=0` (an ephemeral host port, so concurrent runs' gateways never
-  collide), waits for `tester` to exit, `docker cp`'s out any Playwright
+  collide), waits for `tester` to exit, and reports a failure from the tester's
+  own log (plus every service's log tail when the tester never reported) rather
+  than from `up`'s interleaved stream. It `docker cp`'s out any Playwright
   screenshots into `test/e2e/screenshots`, tears the stack down unconditionally,
   and folds the `PASS`/`FAIL [api]`/`[e2e]` counts into the check summary (e.g.
   "api 8/8 passed, e2e 5/5 passed, 3 screenshot(s) captured"). It needs current

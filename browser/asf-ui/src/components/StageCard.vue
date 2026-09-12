@@ -1,11 +1,18 @@
 <script setup>
+import { computed } from 'vue'
 import FindingsTable from './FindingsTable.vue'
 import { fmtDuration, fmtTime, statusTagType } from '@/lib/status'
+import { isScreenshot, screenshotURL } from '@/api/runs'
 
-defineProps({
+const props = defineProps({
   task: { type: Object, required: true },
   index: { type: Number, default: 0 },
+  runId: { type: String, default: '' },
 })
+
+const screenshots = computed(() => (props.task.filesWritten ?? []).filter(isScreenshot))
+const screenshotURLs = computed(() => screenshots.value.map((f) => screenshotURL(props.runId, f)))
+const otherFiles = computed(() => (props.task.filesWritten ?? []).filter((f) => !isScreenshot(f)))
 </script>
 
 <template>
@@ -45,8 +52,20 @@ defineProps({
         :title="`${task.filesWritten.length} files written`"
         name="files"
       >
-        <ul class="files">
-          <li v-for="f in task.filesWritten" :key="f"><code>{{ f }}</code></li>
+        <div v-if="screenshots.length" class="shots">
+          <el-image
+            v-for="(f, i) in screenshots"
+            :key="f"
+            class="shot"
+            :src="screenshotURLs[i]"
+            :preview-src-list="screenshotURLs"
+            :initial-index="i"
+            fit="cover"
+            loading="lazy"
+          />
+        </div>
+        <ul v-if="otherFiles.length" class="files">
+          <li v-for="f in otherFiles" :key="f"><code>{{ f }}</code></li>
         </ul>
       </el-collapse-item>
 
@@ -79,4 +98,9 @@ defineProps({
 .commit .label { color: var(--el-text-color-secondary); margin-right: 6px; }
 .more { margin-top: 8px; }
 .files { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.7; }
+.shots { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.shot {
+  width: 72px; height: 72px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--el-border-color);
+}
 </style>

@@ -41,6 +41,7 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 
 		JSONConsumer: runtime.JSONConsumer(),
 
+		BinProducer:  runtime.ByteStreamProducer(),
 		JSONProducer: runtime.JSONProducer(),
 
 		RunsApproveRunHandler: runs.ApproveRunHandlerFunc(func(params runs.ApproveRunParams) middleware.Responder {
@@ -65,6 +66,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation runs.GetRun has not yet been implemented")
+		}),
+
+		RunsGetRunScreenshotHandler: runs.GetRunScreenshotHandlerFunc(func(params runs.GetRunScreenshotParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.GetRunScreenshot has not yet been implemented")
 		}),
 
 		WebhooksGithubWebhookHandler: webhooks.GithubWebhookHandlerFunc(func(params webhooks.GithubWebhookParams) middleware.Responder {
@@ -146,6 +153,9 @@ type CoordinatorAPI struct {
 	//   - application/json
 	JSONConsumer runtime.Consumer
 
+	// BinProducer registers a producer for the following mime types:
+	//   - image/png
+	BinProducer runtime.Producer
 	// JSONProducer registers a producer for the following mime types:
 	//   - application/json
 	JSONProducer runtime.Producer
@@ -158,6 +168,8 @@ type CoordinatorAPI struct {
 	AgentsGetAgentDetailHandler agents.GetAgentDetailHandler
 	// RunsGetRunHandler sets the operation handler for the get run operation
 	RunsGetRunHandler runs.GetRunHandler
+	// RunsGetRunScreenshotHandler sets the operation handler for the get run screenshot operation
+	RunsGetRunScreenshotHandler runs.GetRunScreenshotHandler
 	// WebhooksGithubWebhookHandler sets the operation handler for the github webhook operation
 	WebhooksGithubWebhookHandler webhooks.GithubWebhookHandler
 	// HealthHealthHandler sets the operation handler for the health operation
@@ -247,6 +259,9 @@ func (o *CoordinatorAPI) Validate() error {
 		unregistered = append(unregistered, "JSONConsumer")
 	}
 
+	if o.BinProducer == nil {
+		unregistered = append(unregistered, "BinProducer")
+	}
 	if o.JSONProducer == nil {
 		unregistered = append(unregistered, "JSONProducer")
 	}
@@ -262,6 +277,9 @@ func (o *CoordinatorAPI) Validate() error {
 	}
 	if o.RunsGetRunHandler == nil {
 		unregistered = append(unregistered, "runs.GetRunHandler")
+	}
+	if o.RunsGetRunScreenshotHandler == nil {
+		unregistered = append(unregistered, "runs.GetRunScreenshotHandler")
 	}
 	if o.WebhooksGithubWebhookHandler == nil {
 		unregistered = append(unregistered, "webhooks.GithubWebhookHandler")
@@ -334,7 +352,10 @@ func (o *CoordinatorAPI) ConsumersFor(mediaTypes []string) map[string]runtime.Co
 func (o *CoordinatorAPI) ProducersFor(mediaTypes []string) map[string]runtime.Producer {
 	result := make(map[string]runtime.Producer, len(mediaTypes))
 	for _, mt := range mediaTypes {
-		if mt == "application/json" {
+		switch mt {
+		case "image/png":
+			result["image/png"] = o.BinProducer
+		case "application/json":
 			result["application/json"] = o.JSONProducer
 		}
 
@@ -393,6 +414,10 @@ func (o *CoordinatorAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/v1/runs/{id}"] = runs.NewGetRun(o.context, o.RunsGetRunHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/v1/runs/{id}/screenshot"] = runs.NewGetRunScreenshot(o.context, o.RunsGetRunScreenshotHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

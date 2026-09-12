@@ -11,6 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -279,6 +282,79 @@ func TestGetRunExposesEventsAndSteps(t *testing.T) {
 	tasks, _ := got["tasks"].([]any)
 	if len(tasks) == 0 {
 		t.Fatal("run detail carries no tasks")
+	}
+}
+
+func getCode(t *testing.T, url string) int {
+	t.Helper()
+	res, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+func TestGetRunScreenshotOverHTTP(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	srv := serve(t, o)
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, o, run.ID)
+
+	dir := t.TempDir()
+	shotDir := filepath.Join(dir, "test", "e2e", "screenshots")
+	if err := os.MkdirAll(shotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if err := os.WriteFile(filepath.Join(shotDir, "login.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real run only gets its WorkspaceDir/FilesWritten from the pipeline; poke
+	// them in directly here since this test drives the HTTP handler, not the gate.
+	stored, _, _ := o.store.Get(run.ID)
+	stored.WorkspaceDir = dir
+	stored.Tasks = append(stored.Tasks, Task{
+		Role: factory.RoleBuildGate, State: "completed",
+		FilesWritten: []string{"test/e2e/screenshots/login.png"},
+	})
+	if err := o.store.Put(stored); err != nil {
+		t.Fatal(err)
+	}
+
+	base := srv.URL + "/v1/runs/" + run.ID + "/screenshot?path="
+
+	res, err := http.Get(base + url.QueryEscape("test/e2e/screenshots/login.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("code = %d, want 200", res.StatusCode)
+	}
+	if got, _ := io.ReadAll(res.Body); !bytes.Equal(got, png) {
+		t.Fatalf("body = %v, want %v", got, png)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("content-type = %q, want image/png", ct)
+	}
+
+	if code := getCode(t, base+url.QueryEscape("../../../../etc/passwd")); code != http.StatusBadRequest {
+		t.Fatalf("traversal code = %d, want 400", code)
+	}
+	if code := getCode(t, base+url.QueryEscape("test/e2e/screenshots/other.png")); code != http.StatusNotFound {
+		t.Fatalf("unrecorded file code = %d, want 404", code)
+	}
+	if code := getCode(t, base+url.QueryEscape("test/e2e/screenshots/login.txt")); code != http.StatusBadRequest {
+		t.Fatalf("wrong extension code = %d, want 400", code)
+	}
+	if code := getCode(t, srv.URL+"/v1/runs/does-not-exist/screenshot?path="+url.QueryEscape("test/e2e/screenshots/login.png")); code != http.StatusNotFound {
+		t.Fatalf("unknown run code = %d, want 404", code)
 	}
 }
 

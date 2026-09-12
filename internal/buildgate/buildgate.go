@@ -91,11 +91,17 @@ func Check(ctx context.Context, runID, dir string, changed []string) Result {
 	}
 
 	// Deployment + component tests only make sense for a runnable service that
-	// the change actually touches, and only once the code compiles.
-	if hasService(goDir, nodeDirs) && isCodeChange(changed) && lookPath("docker") {
-		ran = append(ran, "compose")
-		c.checkCompose(ctx, dir)
-		if len(c.findings) == 0 && hasFile(dir, "docker-compose.test.yml") {
+	// the change actually touches, and only once the code compiles. The deploy
+	// lint is pure Go; validating the compose file and running the stack need
+	// Docker.
+	if hasService(goDir, nodeDirs) && isCodeChange(changed) {
+		docker := lookPath("docker")
+		if docker {
+			ran = append(ran, "compose")
+			c.checkCompose(ctx, dir)
+		}
+		c.lintDeploy(dir)
+		if docker && len(c.findings) == 0 && hasFile(dir, "docker-compose.test.yml") {
 			ran = append(ran, "component")
 			c.checkComponent(ctx, runID, dir)
 		}
@@ -185,7 +191,7 @@ func parseGoErrors(out string) []factory.Finding {
 // --- Node ---
 
 func (c *checker) checkNode(ctx context.Context, dir string) {
-	scripts, rn := readPackage(dir)
+	scripts, rn, playwright := readPackage(dir)
 	role := factory.RoleFrontendDev
 	if rn {
 		role = factory.RoleMobileDeveloper
@@ -203,7 +209,11 @@ func (c *checker) checkNode(ctx context.Context, dir string) {
 			return
 		}
 	}
-	if s, has := scripts["test"]; has && !isPlaceholderTest(s) {
+	// A Playwright suite only has real browsers inside the docker-compose
+	// `tester` service (see checkComponent) — running `npm test` here, on the
+	// build gate's own bare filesystem, always fails with a missing browser
+	// binary regardless of what the generated project did right.
+	if s, has := scripts["test"]; has && !isPlaceholderTest(s) && !playwright {
 		if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "test"); !ok {
 			c.fail("npm test", out, role)
 			c.add(buildFinding("npm test failed", out, role))
@@ -211,11 +221,11 @@ func (c *checker) checkNode(ctx context.Context, dir string) {
 	}
 }
 
-func readPackage(dir string) (scripts map[string]string, reactNative bool) {
+func readPackage(dir string) (scripts map[string]string, reactNative, playwright bool) {
 	scripts = map[string]string{}
 	b, err := os.ReadFile(filepath.Join(dir, "package.json"))
 	if err != nil {
-		return scripts, false
+		return scripts, false, false
 	}
 	var pkg struct {
 		Scripts         map[string]string `json:"scripts"`
@@ -223,14 +233,16 @@ func readPackage(dir string) (scripts map[string]string, reactNative bool) {
 		DevDependencies map[string]string `json:"devDependencies"`
 	}
 	if json.Unmarshal(b, &pkg) != nil {
-		return scripts, false
+		return scripts, false, false
 	}
 	for k, v := range pkg.Scripts {
 		scripts[k] = v
 	}
 	_, rn := pkg.Dependencies["react-native"]
 	_, rnDev := pkg.DevDependencies["react-native"]
-	return scripts, rn || rnDev
+	_, pw := pkg.Dependencies["@playwright/test"]
+	_, pwDev := pkg.DevDependencies["@playwright/test"]
+	return scripts, rn || rnDev, pw || pwDev
 }
 
 func isPlaceholderTest(s string) bool {
@@ -279,48 +291,191 @@ func (c *checker) checkCompose(ctx context.Context, dir string) {
 	}
 }
 
-// checkComponent runs the tester service in the compose stack and treats its
-// exit code as the verdict. It always tears the stack down.
+// checkComponent builds the stack's images, runs the tester service in the
+// compose stack and treats its exit code as the verdict. It always tears the
+// stack down.
+//
+// Building is its own step so a failure says which step broke: an image that
+// doesn't build is a Dockerfile problem, reported from the build log; a failed
+// run is reported from the tester's own log — never from `up`'s build and pull
+// progress, which is all an `up --build` failure used to show.
 //
 // The gateway's host port defaults to 8080 in the generated docker-compose.yml
 // (${GATEWAY_PORT:-8080}) for a real deployment; here it's overridden to an
 // ephemeral port (GATEWAY_PORT=0) so concurrent runs' stacks never collide on
 // a fixed host port — see checkComponent's caller doc and test-engineer.md.
 func (c *checker) checkComponent(ctx context.Context, runID, dir string) {
-	base := composeFile(dir)
 	proj := "asf-" + shortID(runID)
-	files := []string{"-p", proj, "-f", base, "-f", "docker-compose.test.yml"}
+	files := []string{"-p", proj, "-f", composeFile(dir), "-f", "docker-compose.test.yml"}
+	compose := func(args ...string) []string {
+		return append(append([]string{"compose"}, files...), args...)
+	}
+	env := []string{"GATEWAY_PORT=0"}
 
 	defer func() {
 		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer dcancel()
-		down := append([]string{"compose"}, files...)
-		down = append(down, "down", "-v", "--remove-orphans", "--rmi", "local")
-		_, _ = run(dctx, dir, nil, "docker", down...)
+		_, _ = run(dctx, dir, env, "docker", compose("down", "-v", "--remove-orphans", "--rmi", "local")...)
 	}()
 
 	cctx, cancel := context.WithTimeout(ctx, composeStep)
 	defer cancel()
-	up := append([]string{"compose"}, files...)
-	up = append(up, "up", "--build", "--quiet-pull", "--abort-on-container-exit", "--exit-code-from", "tester")
-	out, ok := run(cctx, dir, []string{"GATEWAY_PORT=0"}, "docker", up...)
+
+	// --progress is a global compose flag: it goes before the subcommand.
+	build := append([]string{"compose", "--progress", "plain"}, files...)
+	if out, ok := run(cctx, dir, env, "docker", append(build, "build")...); !ok {
+		c.fail("stack build", out, factory.RoleBackendDeveloper)
+		c.add(stackBuildFinding(dir, out))
+		return
+	}
+
+	out, ok := run(cctx, dir, env, "docker", compose("up", "--no-build", "--quiet-pull", "--abort-on-container-exit", "--exit-code-from", "tester")...)
+	testerLog := composeLogs(ctx, dir, env, compose("logs", "--no-color", "--no-log-prefix", "tester"))
 	if !ok {
-		c.fail("component tests", out, factory.RoleBackendDeveloper)
-		c.add(factory.Finding{
-			Source:     "build-gate",
-			Severity:   "high",
-			Category:   "component-test",
-			Title:      "component tests failed against the running stack",
-			Suggestion: tail(out, maxDetail),
-			TargetRole: factory.RoleBackendDeveloper,
-		})
+		report := componentReport(ctx, dir, env, compose, out, testerLog, cctx.Err() != nil)
+		c.fail("component tests", report, factory.RoleBackendDeveloper)
+		c.add(componentFinding(testerLog, report))
 	}
 
 	// The tester container is stopped but not removed yet (the `down` above is
 	// deferred) — pull out any Playwright screenshots and report what ran,
 	// regardless of pass/fail.
 	c.extractScreenshots(ctx, dir, files)
-	c.testBreakdown = summarizeComponentTests(out, len(c.screenshots))
+	if strings.TrimSpace(testerLog) == "" {
+		testerLog = out
+	}
+	c.testBreakdown = summarizeComponentTests(testerLog, len(c.screenshots))
+}
+
+// composeLogs best-effort reads one `docker compose logs` invocation.
+func composeLogs(ctx context.Context, dir string, env, args []string) string {
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, _ := run(lctx, dir, env, "docker", args...)
+	return out
+}
+
+// componentReport is what the LLM pass gets for a failed run: the tester's own
+// log; every service's log tail when the tester never reported a result (a
+// dependency that never got healthy, a crash on start); then the tail of `up`'s
+// interleaved stream for anything else.
+func componentReport(ctx context.Context, dir string, env []string, compose func(...string) []string, upOut, testerLog string, timedOut bool) string {
+	var b strings.Builder
+	if timedOut {
+		fmt.Fprintf(&b, "The component run was killed after %s without finishing.\n\n", composeStep)
+	}
+	fmt.Fprintf(&b, "## tester log\n\n%s\n\n", orNone(testerLog))
+	if !strings.Contains(testerLog, "[api]") && !strings.Contains(testerLog, "[e2e]") {
+		all := composeLogs(ctx, dir, env, compose("logs", "--no-color", "--tail", "80"))
+		fmt.Fprintf(&b, "## every service's log (the tester never reported a result)\n\n%s\n\n", orNone(all))
+	}
+	fmt.Fprintf(&b, "## docker compose up (tail)\n\n%s\n", tail(upOut, maxDetail))
+	return b.String()
+}
+
+// componentFinding is the deterministic finding for a failed run: the FAIL
+// lines when the suites reported any — routed to frontend when every failure
+// is an [e2e] one — else the tail of the report.
+func componentFinding(testerLog, report string) factory.Finding {
+	var fails []string
+	apiFailed := false
+	for _, ln := range strings.Split(testerLog, "\n") {
+		i := strings.Index(ln, "FAIL [")
+		if i < 0 {
+			continue
+		}
+		ln = strings.TrimSpace(ln[i:])
+		apiFailed = apiFailed || strings.HasPrefix(ln, "FAIL [api]")
+		fails = append(fails, ln)
+	}
+	f := factory.Finding{
+		Source:     "build-gate",
+		Severity:   "high",
+		Category:   "component-test",
+		Title:      "component tests failed against the running stack",
+		Suggestion: tail(report, maxDetail),
+		TargetRole: factory.RoleBackendDeveloper,
+	}
+	if len(fails) > 0 {
+		f.Title = fmt.Sprintf("%d component test(s) failed against the running stack", len(fails))
+		f.Suggestion = tail(strings.Join(fails, "\n"), maxDetail)
+		if !apiFailed {
+			f.TargetRole = factory.RoleFrontendDev
+		}
+	}
+	return f
+}
+
+// Compose's plain build log names the failing service in bake's
+// "target <svc>: failed to solve" and in the failed step's " > [<svc> 3/7] …"
+// (a stack that builds a single image names none), the failing Dockerfile line
+// as "Dockerfile:3", and wraps the cause in buildkit's own prefixes.
+var (
+	buildTarget = regexp.MustCompile(`target ([A-Za-z0-9_.-]+): failed to solve|> \[([A-Za-z0-9_.-]+) \d+/\d+\]`)
+	buildStep   = regexp.MustCompile(`(?m)^\s*> \[(?:[A-Za-z0-9_.-]+ )?\d+/\d+\] (.*?):?\s*$`)
+	buildLine   = regexp.MustCompile(`(?m)^\S*Dockerfile\S*:(\d+)\s*$`)
+	buildNoise  = regexp.MustCompile(`target [A-Za-z0-9_.-]+: |failed to solve: |failed to compute cache key: |failed to calculate checksum of ref \S+: `)
+)
+
+// stackBuildFinding turns a failed `docker compose build` into a finding on the
+// failing service's Dockerfile line, owned by whoever owns its build context.
+func stackBuildFinding(dir, out string) factory.Finding {
+	cause := buildCause(out)
+	f := factory.Finding{
+		Source:     "build-gate",
+		Severity:   "high",
+		Category:   "deploy",
+		Title:      truncate("docker compose build failed: "+cause, 200),
+		Suggestion: tail(out, maxDetail),
+		TargetRole: factory.RoleBackendDeveloper,
+	}
+	builds := composeBuilds(dir)
+	svc := ""
+	if m := buildTarget.FindStringSubmatch(out); m != nil {
+		svc = m[1] + m[2]
+	} else if len(builds) == 1 {
+		svc = builds[0].Service
+	}
+	if svc == "" {
+		return f
+	}
+	at := ""
+	if m := buildStep.FindStringSubmatch(out); m != nil {
+		at = " at `" + truncate(m[1], 80) + "`"
+	}
+	f.Title = truncate(fmt.Sprintf("image for service %q failed to build%s: %s", svc, at, cause), 200)
+	for _, b := range builds {
+		if b.Service != svc {
+			continue
+		}
+		f.File = b.Dockerfile
+		f.TargetRole = roleForContext(filepath.Join(dir, filepath.FromSlash(b.Context)))
+		if m := buildLine.FindStringSubmatch(out); m != nil {
+			f.Line = atoi(m[1])
+		}
+	}
+	return f
+}
+
+// buildCause is the most specific error line in a build log — the last
+// "failed to solve", else the last ERROR — without buildkit's wrapping.
+func buildCause(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, marker := range []string{"failed to solve", "ERROR"} {
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], marker) {
+				return strings.TrimSpace(buildNoise.ReplaceAllString(lines[i], ""))
+			}
+		}
+	}
+	return "see the build output"
+}
+
+func orNone(s string) string {
+	if s = strings.TrimSpace(s); s == "" {
+		return "(no output)"
+	}
+	return s
 }
 
 // extractScreenshots best-effort docker-cp's /output/screenshots out of the
@@ -409,7 +564,7 @@ func hasService(goDir string, nodeDirs []string) bool {
 		}
 	}
 	for _, nd := range nodeDirs {
-		if s, _ := readPackage(nd); s["build"] != "" || s["start"] != "" {
+		if s, _, _ := readPackage(nd); s["build"] != "" || s["start"] != "" {
 			return true
 		}
 	}
@@ -523,12 +678,16 @@ func tail(s string, n int) string {
 	return "…\n" + s[len(s)-n:]
 }
 
+// clip bounds s to about n bytes, keeping its start and — most of the budget —
+// its end: a command's cause usually comes last (a build's error, a test run's
+// verdict), after a long run of progress output.
 func clip(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "\n… (truncated)"
+	head := min(2_000, n/2) // enough to show what was running
+	return s[:head] + fmt.Sprintf("\n… (%d bytes elided) …\n", len(s)-n) + s[len(s)-(n-head):]
 }
 
 func truncate(s string, n int) string {

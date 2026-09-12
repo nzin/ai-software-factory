@@ -4,6 +4,8 @@ package runs
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"time"
 
 	"github.com/go-openapi/runtime"
@@ -52,6 +54,30 @@ type Client struct {
 // ClientOption may be used to customize the behavior of Client methods.
 type ClientOption func(*runtime.ClientOperation)
 
+// This client is generated with a few options you might find useful for your swagger spec.
+//
+// Feel free to add you own set of options.
+
+// WithAccept allows the client to force the Accept header
+// to negotiate a specific Producer from the server.
+//
+// You may use this option to set arbitrary extensions to your MIME media type.
+func WithAccept(mime string) ClientOption {
+	return func(r *runtime.ClientOperation) {
+		r.ProducesMediaTypes = []string{mime}
+	}
+}
+
+// WithAcceptApplicationJSON sets the Accept header to "application/json".
+func WithAcceptApplicationJSON(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"application/json"}
+}
+
+// WithAcceptImagePng sets the Accept header to "image/png".
+func WithAcceptImagePng(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"image/png"}
+}
+
 // ClientService is the interface for Client methods.
 type ClientService interface {
 
@@ -72,6 +98,12 @@ type ClientService interface {
 
 	// GetRunContext get one run.
 	GetRunContext(ctx context.Context, params *GetRunParams, opts ...ClientOption) (*GetRunOK, error)
+
+	// GetRunScreenshot fetch a playwright screenshot written during the run by its repo relative path.
+	GetRunScreenshot(params *GetRunScreenshotParams, writer io.Writer, opts ...ClientOption) (*GetRunScreenshotOK, error)
+
+	// GetRunScreenshotContext fetch a playwright screenshot written during the run by its repo relative path.
+	GetRunScreenshotContext(ctx context.Context, params *GetRunScreenshotParams, writer io.Writer, opts ...ClientOption) (*GetRunScreenshotOK, error)
 
 	// ListRuns list all runs.
 	ListRuns(params *ListRunsParams, opts ...ClientOption) (*ListRunsOK, error)
@@ -287,6 +319,74 @@ func (a *Client) GetRunContext(ctx context.Context, params *GetRunParams, opts .
 	unexpectedSuccess := result.(*GetRunDefault)
 
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// GetRunScreenshot fetches a playwright screenshot written during the run by its repo relative path.
+//
+// `path` must be one of the run's recorded filesWritten entries under test/e2e/screenshots/ — anything else is rejected.
+// .
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.GetRunScreenshotContext] instead.
+func (a *Client) GetRunScreenshot(params *GetRunScreenshotParams, writer io.Writer, opts ...ClientOption) (*GetRunScreenshotOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.GetRunScreenshotContext(ctx, params, writer, opts...)
+}
+
+// GetRunScreenshotContext fetches a playwright screenshot written during the run by its repo relative path.
+//
+// `path` must be one of the run's recorded filesWritten entries under test/e2e/screenshots/ — anything else is rejected.
+// .
+//
+// Do not use the deprecated [GetRunScreenshotParams.Context] with this method: it would be ignored.
+func (a *Client) GetRunScreenshotContext(ctx context.Context, params *GetRunScreenshotParams, writer io.Writer, opts ...ClientOption) (*GetRunScreenshotOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetRunScreenshotParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "getRunScreenshot",
+		Method:             "GET",
+		PathPattern:        "/v1/runs/{id}/screenshot",
+		ProducesMediaTypes: []string{"image/png"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetRunScreenshotReader{formats: a.formats, writer: writer},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetRunScreenshotOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getRunScreenshot: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
 }
 
 // ListRuns lists all runs.

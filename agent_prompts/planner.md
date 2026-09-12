@@ -43,8 +43,9 @@ sections:
    needs a `Dockerfile` and there must be a root `docker-compose.yml`. Say which
    developer owns each service's Dockerfile; add explicit tasks if the repo has
    none. The **test-engineer** (a separate agent that runs after the developers)
-   owns the root `docker-compose.yml` and a `docker-compose.test.yml` overlay
-   plus a component test suite — do not assign those to a developer. When the
+   owns the root `docker-compose.yml` and the component/e2e test suites, and
+   the factory itself generates the `docker-compose.test.yml` overlay and the
+   tester image — do not assign any of those to a developer. When the
    plan includes a browser-facing frontend, the deployment is reached through a
    single gateway (Traefik) that the test-engineer wires in front of the
    backend and frontend — no separate gateway task is needed, just make sure a

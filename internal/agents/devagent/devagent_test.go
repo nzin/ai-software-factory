@@ -166,7 +166,7 @@ func TestRunOnceSingleCommit(t *testing.T) {
 			"=== FILE: go.mod ===\nmodule x\n=== END FILE: go.mod ===\n",
 	}}
 
-	res, err := runOnce(ctx, fc, "sys", env, repo)
+	res, err := runOnce(ctx, fc, "sys", env, repo, options{})
 	if err != nil {
 		t.Fatalf("runOnce: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestExecutorFixPassIsSingleCall(t *testing.T) {
 		"=== FILE: main.go ===\npackage main // #nosec G404 -- deliberate\n=== END FILE: main.go ===\n",
 	}}
 
-	got, err := run(ctx, fc, "sys", env)
+	got, err := run(ctx, fc, "sys", env, options{})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestRunOnceTruncatedCommitsCompleteFiles(t *testing.T) {
 			"=== FILE: store.go ===\npackage main\n// cut off before the closing marker",
 	}}
 
-	res, err := runOnce(ctx, fc, "sys", env, repo)
+	res, err := runOnce(ctx, fc, "sys", env, repo, options{})
 	if err != nil {
 		t.Fatalf("runOnce: %v", err)
 	}

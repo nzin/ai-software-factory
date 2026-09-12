@@ -243,7 +243,7 @@ const removeComment = (i) => review.comments.splice(i, 1)
 
         <el-tab-pane :label="`Steps (${(run.tasks || []).length})`" name="steps">
           <el-empty v-if="!(run.tasks || []).length" description="No steps yet" :image-size="70" />
-          <StageCard v-for="(t, i) in run.tasks || []" :key="i" :task="t" :index="i" />
+          <StageCard v-for="(t, i) in run.tasks || []" :key="i" :task="t" :index="i" :run-id="id" />
         </el-tab-pane>
 
         <el-tab-pane label="Plan" name="plan">

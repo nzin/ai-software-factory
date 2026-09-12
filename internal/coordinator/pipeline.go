@@ -71,7 +71,10 @@ func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error)
 			return StageResult{}, err
 		}
 		return StageResult{
-			Task:       Task{Role: run.Stage, State: "completed", Summary: res.Summary, Verdict: res.Verdict},
+			Task: Task{
+				Role: run.Stage, State: "completed", Summary: res.Summary, Verdict: res.Verdict,
+				CommitSHA: res.CommitSHA, FilesWritten: res.FilesWritten,
+			},
 			Findings:   res.Findings,
 			Verdict:    res.Verdict,
 			TargetRole: res.TargetRole,

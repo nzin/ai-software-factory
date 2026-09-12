@@ -15,24 +15,44 @@ The developers have committed the feature. You run once, after them. You do not
 have a task list — derive your work from the **PRD's acceptance criteria** and
 the implementation plan, reading the current repository to learn the real API.
 
+## Factory-managed files — never write these
+
+The factory lays down the test harness itself, right after your files, and
+overwrites anything you wrote at these paths:
+
+- `test/Dockerfile` — the one `tester` image. Its build context is `./test`,
+  so it sees both suites. `test/run.sh` is its entrypoint: it runs the Go suite,
+  then the Playwright suite when `test/e2e/` has specs, and exits non-zero if
+  either failed.
+- `test/component/go.mod` — `module example.com/component-test`, standard
+  library only.
+- `test/e2e/package.json`, `test/e2e/playwright.config.ts`,
+  `test/e2e/asf-reporter.cjs` — the exact Playwright version (matching the
+  browsers baked into the tester image), `baseURL` from `BASE_URL` (default
+  `http://gateway`), and the reporter that prints `PASS [e2e]` / `FAIL [e2e]`.
+- `docker-compose.test.yml` — the overlay adding the `tester` service, which
+  waits for a healthy `gateway` (§2).
+
+Write no other Dockerfile under `test/` either.
+
 Produce exactly these artifacts (return the full file contents as usual):
 
 ## 1. A component test suite — `test/component/`
 
-A small **standalone Go program** (`test/component/main.go`, `package main`, its
-own minimal `go.mod` with module path `example.com/component-test`) that
-black-box-exercises the **running** service over HTTP, **through the gateway**
-(see §2) — never the `app` service directly:
+A small **standalone Go program** (`test/component/main.go`, `package main`)
+that black-box-exercises the **running** service over HTTP, **through the
+gateway** (see §2) — never the `app` service directly:
 
 - one function per acceptance criterion; print `PASS [api] <name>` /
   `FAIL [api] <name>: <why>`.
 - read the service base URL from an env var (`APP_URL`, default
   `http://gateway`), hitting the backend's real paths (e.g. `/api/...`).
 - exit non-zero if any scenario failed.
-- keep it dependency-free — standard library only (`net/http`, `encoding/json`).
+- keep it dependency-free — standard library only (`net/http`,
+  `encoding/json`); the factory's `go.mod` declares no requirements.
 
-Also write `test/component/Dockerfile` (a tiny `FROM golang:1.26` that builds and
-runs it) and `test/component/README.md` (one paragraph + how to run it).
+Also write `test/component/README.md` (one paragraph + how to run it:
+`make component-test`).
 
 ## 2. The reverse proxy — `gateway/` and its service in `docker-compose.yml`
 
@@ -75,6 +95,8 @@ service from §2, and:
   `gateway` is reachable from outside the compose network.
 - **no host bind-mounts** anywhere — named volumes only. The gate runs this
   against a shared Docker daemon where host paths won't resolve.
+- every `COPY`/`ADD` in a service's Dockerfile must stay **inside that
+  service's build context** — Docker can't see `../anything`.
 - name the primary service `app` (or keep an existing name and set `APP_URL`
   in the tester service accordingly); name a separate SPA/static service
   `frontend` when one exists.
@@ -82,58 +104,27 @@ service from §2, and:
 ## 4. A frontend test suite — `test/e2e/` (only when there is a browser-facing
 frontend to test)
 
-A **Playwright** (`@playwright/test`) project that drives a real browser
-against the app **through the gateway**:
+**Playwright** specs (`test/e2e/*.spec.ts`) that drive a real browser against
+the app **through the gateway**. Write the spec files only — the
+`package.json`, config and reporter are factory-managed (see above):
 
-- read the base URL from `BASE_URL`, default `http://gateway`.
-- one test per user-facing acceptance criterion.
+- `import { test, expect } from '@playwright/test'`, and navigate with
+  relative URLs (`page.goto('/')`) — `baseURL` already points at the gateway.
+- one test per user-facing acceptance criterion, named after it (the name is
+  what the build gate reports).
 - every test takes a screenshot (`page.screenshot()`) to a **fixed absolute
   in-container path**, `/output/screenshots/<test-name>.png` — the build gate
   extracts this exact path, so don't change it.
-- print `PASS [e2e] <name>` / `FAIL [e2e] <name>: <why>` for each test.
-- pick **one concrete Playwright version** (`x.y.z`, never a wildcard like
-  `1.4x` or a caret/tilde range) and use that **exact same version string in
-  both places**: the npm dependency, pinned exact
-  (`npm install --save-exact @playwright/test@x.y.z`, so `package.json` reads
-  `"@playwright/test": "x.y.z"`), and the test image's base image tag,
-  `mcr.microsoft.com/playwright:vx.y.z-jammy` (browsers preinstalled, so the
-  container doesn't download browsers on every run). These two **must**
-  match exactly — the base image's preinstalled browser binaries are
-  version-locked to that exact `@playwright/test` release, and even a
-  patch-level mismatch (e.g. npm resolving to a newer version than the base
-  image ships) makes `browserType.launch()` fail at test time with a missing
-  browser binary.
+- don't print `PASS`/`FAIL` lines yourself; the factory's reporter does.
 
 If there is no browser-facing frontend, skip this section entirely — do not
 invent one.
 
-## 5. The test overlay — `docker-compose.test.yml`
+## 5. The test overlay — factory-managed
 
-A compose overlay adding **one** service, `tester`, whose image contains
-**both** suites — the Go toolchain (or a precompiled binary) and, when
-`test/e2e/` exists, Node + Playwright:
-
-```yaml
-services:
-  tester:
-    build: ./test/component
-    environment:
-      APP_URL: http://gateway
-      BASE_URL: http://gateway
-    depends_on:
-      gateway:
-        condition: service_healthy
-```
-
-The `tester` image's entrypoint runs the Go suite, then the Playwright suite
-(when present), and exits non-zero if either failed — combine both suites'
-stdout so both `[api]` and `[e2e]` lines show up together in one log.
-
-When `test/e2e/` exists, its own Dockerfile already pins
-`mcr.microsoft.com/playwright:vx.y.z-jammy` with matching browsers baked in
-(§4) — don't add a separate `npm install`/`playwright install` step for
-browsers in the `tester` build; that would resolve its own, possibly
-different, Playwright version and reintroduce the same mismatch.
+`docker-compose.test.yml` is generated (see above); don't write it. It relies
+on §2: a `gateway` service with a healthcheck. If the gateway joins named
+networks, the tester is attached to the same ones.
 
 ## 6. A Makefile target
 

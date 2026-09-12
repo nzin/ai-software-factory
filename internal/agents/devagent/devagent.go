@@ -63,17 +63,63 @@ Rules:
 - If (and only if) there is genuinely nothing to change, answer with exactly the
   line: NO CHANGES — never with prose.`
 
+// PostWriteFunc runs over the worktree after a single-call pass has written the
+// model's files and before they are committed. What it writes lands in the same
+// commit; what it removes is committed as a deletion. The test-engineer uses it
+// to lay down the factory-owned test harness (testharness.Materialize).
+type PostWriteFunc func(dir string) (written, removed []string, err error)
+
+// Option customises an Executor.
+type Option func(*options)
+
+type options struct {
+	postWrite PostWriteFunc
+}
+
+// WithPostWrite runs f after the model's files are written (see PostWriteFunc).
+func WithPostWrite(f PostWriteFunc) Option {
+	return func(o *options) { o.postWrite = f }
+}
+
+// postWrite runs f and folds its changes into the model's written list: its
+// writes join the list and its removals leave it (force-adding a path that no
+// longer exists, and was never tracked, is a git error).
+func postWrite(f PostWriteFunc, dir string, written []string) ([]string, error) {
+	extra, removed, err := f(dir)
+	if err != nil {
+		return written, err
+	}
+	gone := map[string]bool{}
+	for _, p := range removed {
+		gone[p] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range append(written, extra...) {
+		if !gone[p] && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // Executor builds the developer executor for a given role prompt.
-func Executor(client Completer, systemPrompt string) a2asrv.AgentExecutor {
+func Executor(client Completer, systemPrompt string, opts ...Option) a2asrv.AgentExecutor {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return agentkit.DispatchExecutor(func(ctx context.Context, env factory.DispatchEnvelope) (factory.ResultEnvelope, error) {
-		return run(ctx, client, systemPrompt, env)
+		return run(ctx, client, systemPrompt, env, o)
 	})
 }
 
 // run opens the worktree and dispatches the work: one model call per task on a
 // first developer pass with more than one task, a single call otherwise (fix
 // passes, the test-engineer, single/zero-task roles).
-func run(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope) (factory.ResultEnvelope, error) {
+func run(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, o options) (factory.ResultEnvelope, error) {
 	repo, err := workspace.Open(ctx, env.WorkspaceDir)
 	if err != nil {
 		return factory.ResultEnvelope{}, err
@@ -83,11 +129,11 @@ func run(ctx context.Context, client Completer, systemPrompt string, env factory
 	if env.Attempt == 0 && factory.IsDeveloperRole(env.Stage) && len(env.Tasks) > 1 {
 		return runBatched(ctx, client, systemPrompt, env, repo)
 	}
-	return runOnce(ctx, client, systemPrompt, env, repo)
+	return runOnce(ctx, client, systemPrompt, env, repo, o)
 }
 
 // runOnce asks the model for every file in one call and makes one commit.
-func runOnce(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, repo *workspace.Repo) (factory.ResultEnvelope, error) {
+func runOnce(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, repo *workspace.Repo, o options) (factory.ResultEnvelope, error) {
 	tree, _ := repo.Tree(ctx)
 	user := buildPrompt(env, repo.Dir, tree)
 
@@ -117,6 +163,11 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 	written, err := repo.WriteFiles(files)
 	if err != nil {
 		return factory.ResultEnvelope{}, err
+	}
+	if o.postWrite != nil {
+		if written, err = postWrite(o.postWrite, repo.Dir, written); err != nil {
+			return factory.ResultEnvelope{}, fmt.Errorf("devagent(%s): post-write: %w", env.Stage, err)
+		}
 	}
 	// Force-stage what we just wrote: a .gitignore the model authored in this
 	// same pass must not be able to silently drop our own source files.
