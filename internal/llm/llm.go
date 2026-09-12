@@ -134,7 +134,42 @@ func (c *Client) params(system, user string) anthropic.MessageNewParams {
 	if effort := c.effort(); effort != "" {
 		params.OutputConfig = anthropic.OutputConfigParam{Effort: effort}
 	}
+	if c.hasTool("web_search") {
+		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
+			OfWebSearchTool20250305: &anthropic.WebSearchTool20250305Param{},
+		})
+	}
 	return params
+}
+
+// hasTool reports whether the agent's prompt front-matter enabled the named
+// server tool via `params: {tools: [...]}`. Config has no first-class Tools
+// field: it round-trips through the catalog service, whose ModelConfig schema
+// whitelists only provider/model/maxTokens/effort/thinking/params, so a new
+// named field would be silently dropped — Params is the only knob that
+// survives that round trip untouched. The value is typically []any after a
+// YAML->JSON round trip, but []string is accepted too for direct construction
+// (e.g. in tests).
+func (c *Client) hasTool(name string) bool {
+	v, ok := c.cfg.Params["tools"]
+	if !ok {
+		return false
+	}
+	switch list := v.(type) {
+	case []string:
+		for _, s := range list {
+			if s == name {
+				return true
+			}
+		}
+	case []any:
+		for _, s := range list {
+			if str, ok := s.(string); ok && str == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func textOf(m *anthropic.Message) (string, error) {
