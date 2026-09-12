@@ -21,6 +21,9 @@ type Finding struct {
 	// category
 	Category string `json:"category,omitempty"`
 
+	// verbatim excerpt of the actual failure the title/suggestion were derived from
+	Evidence string `json:"evidence,omitempty"`
+
 	// file
 	File string `json:"file,omitempty"`
 

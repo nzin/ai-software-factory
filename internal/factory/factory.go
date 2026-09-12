@@ -25,6 +25,13 @@ const (
 // DeveloperRoles are the roles that write code into the worktree.
 var DeveloperRoles = []string{RoleBackendDeveloper, RoleFrontendDev, RoleMobileDeveloper}
 
+// RawFailuresDir is the workspace-relative directory build-gate writes raw
+// (unsummarized) command failure output to — see internal/agents/buildgate.
+// Named here, in the shared contracts package, so devagent can exclude it from
+// the current-repository content it blindly inlines into every prompt without
+// creating a dependency between the two agent packages.
+const RawFailuresDir = "build-gate-raw"
+
 // PlanTask is one unit of work the planner emits for a developer role.
 type PlanTask struct {
 	ID      string `json:"id"`
@@ -42,6 +49,11 @@ type Finding struct {
 	Line       int    `json:"line,omitempty"`
 	Title      string `json:"title"`
 	Suggestion string `json:"suggestion,omitempty"`
+	// Evidence is a verbatim excerpt of the actual failure — the real error
+	// message / call log / assertion output the title/suggestion are derived
+	// from, not a paraphrase. It exists so a title can be checked against the
+	// text it's supposedly summarizing, instead of being trusted at face value.
+	Evidence   string `json:"evidence,omitempty"`
 	TargetRole string `json:"targetRole,omitempty"` // Phase 3: which role should fix it
 }
 
@@ -128,7 +140,7 @@ func ParsePlan(plannerOutput string) PlanDoc {
 func RouteRole(findings []Finding, lastDev string) string {
 	count := map[string]int{}
 	for _, f := range findings {
-		if r := normalizeRole(f.TargetRole); IsDeveloperRole(r) {
+		if r := NormalizeRole(f.TargetRole); IsDeveloperRole(r) {
 			count[r]++
 		}
 	}
@@ -214,16 +226,16 @@ func ParsePlanTasks(plannerOutput string) ([]PlanTask, string) {
 func TasksForRole(tasks []PlanTask, role string) []PlanTask {
 	var out []PlanTask
 	for _, t := range tasks {
-		if normalizeRole(t.Role) == role {
+		if NormalizeRole(t.Role) == role {
 			out = append(out, t)
 		}
 	}
 	return out
 }
 
-// normalizeRole maps loose planner output ("backend", "Backend Developer") to a
+// NormalizeRole maps loose planner output ("backend", "Backend Developer") to a
 // canonical role key.
-func normalizeRole(r string) string {
+func NormalizeRole(r string) string {
 	switch strings.ToLower(strings.TrimSpace(r)) {
 	case "backend", "backend-developer", "backend developer", "api":
 		return RoleBackendDeveloper
@@ -242,7 +254,7 @@ func normalizeRole(r string) string {
 func NormalizeTasks(tasks []PlanTask) []PlanTask {
 	out := make([]PlanTask, len(tasks))
 	for i, t := range tasks {
-		t.Role = normalizeRole(t.Role)
+		t.Role = NormalizeRole(t.Role)
 		out[i] = t
 	}
 	return out

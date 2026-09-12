@@ -425,7 +425,7 @@ func findingToAPI(f Finding) *models.Finding {
 	return &models.Finding{
 		Source: f.Source, Severity: f.Severity, Category: f.Category,
 		File: f.File, Line: int64(f.Line), Title: f.Title,
-		Suggestion: f.Suggestion, TargetRole: f.TargetRole,
+		Suggestion: f.Suggestion, Evidence: f.Evidence, TargetRole: f.TargetRole,
 	}
 }
 

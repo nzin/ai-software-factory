@@ -5,6 +5,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -113,6 +114,126 @@ func (c *Client) CompleteStream(ctx context.Context, system, user string) (strin
 		return txt, nil // partial; caller may still be able to use it
 	}
 	return textOf(&msg)
+}
+
+// Tool is a client-executed, read-only tool the model can call mid-conversation
+// via CompleteAgentic — a name, a description, and a JSON schema for its input.
+// Unlike the built-in server tools (web_search, wired in params() via
+// hasTool), the tool itself runs locally: CompleteAgentic hands each call to
+// the ToolExecFunc it's given and feeds the result back to the model.
+type Tool struct {
+	Name        string
+	Description string
+	// Properties and Required together form the tool's JSON input schema
+	// (an object schema — the only shape Claude's tool_use supports). e.g.
+	// Properties: map[string]any{"path": map[string]any{"type": "string"}},
+	// Required: []string{"path"}.
+	Properties map[string]any
+	Required   []string
+}
+
+// ToolExecFunc executes one tool call and returns the text to feed back to the
+// model. A returned error is reported to the model as a tool error (so it can
+// adjust and retry) rather than aborting the loop.
+type ToolExecFunc func(ctx context.Context, name string, input json.RawMessage) (string, error)
+
+const (
+	// defaultMaxToolTurns bounds a CompleteAgentic loop when the caller passes
+	// maxTurns <= 0. Each turn is a full model round-trip; the 90-minute
+	// coordinator dispatch timeout comfortably absorbs this many.
+	defaultMaxToolTurns = 8
+	// maxToolResultBytes caps what one tool call feeds back to the model, so a
+	// large file read or diff can't blow up the running conversation across
+	// several turns.
+	maxToolResultBytes = 8_000
+)
+
+// CompleteAgentic is Complete with a bounded tool-use loop: the model may call
+// any of tools (executed via exec, capped at maxTurns round-trips — 0 uses
+// defaultMaxToolTurns) before giving its final text answer, which is returned
+// exactly as Complete would return it. Tool calls are not streamed; each
+// round-trip is bounded by callTimeout like a plain Complete call.
+func (c *Client) CompleteAgentic(ctx context.Context, system, user string, tools []Tool, exec ToolExecFunc, maxTurns int) (string, error) {
+	if maxTurns <= 0 {
+		maxTurns = defaultMaxToolTurns
+	}
+	params := c.params(system, user)
+	for _, t := range tools {
+		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
+			OfTool: &anthropic.ToolParam{
+				Name:        t.Name,
+				Description: anthropic.String(t.Description),
+				InputSchema: anthropic.ToolInputSchemaParam{
+					Properties: t.Properties,
+					Required:   t.Required,
+				},
+			},
+		})
+	}
+
+	for turn := 0; turn < maxTurns; turn++ {
+		resp, err := c.callOnce(ctx, params)
+		if err != nil {
+			return "", fmt.Errorf("llm: tool-use turn %d: %w", turn, err)
+		}
+		if resp.StopReason == anthropic.StopReasonRefusal {
+			return "", fmt.Errorf("llm: model refused the request (%s): %s",
+				resp.StopDetails.Category, resp.StopDetails.Explanation)
+		}
+		if resp.StopReason != anthropic.StopReasonToolUse {
+			return textOf(resp)
+		}
+
+		var assistantBlocks, toolResults []anthropic.ContentBlockParamUnion
+		for _, block := range resp.Content {
+			switch b := block.AsAny().(type) {
+			case anthropic.TextBlock:
+				assistantBlocks = append(assistantBlocks, anthropic.NewTextBlock(b.Text))
+			case anthropic.ThinkingBlock:
+				assistantBlocks = append(assistantBlocks, anthropic.NewThinkingBlock(b.Signature, b.Thinking))
+			case anthropic.RedactedThinkingBlock:
+				assistantBlocks = append(assistantBlocks, anthropic.NewRedactedThinkingBlock(b.Data))
+			case anthropic.ToolUseBlock:
+				assistantBlocks = append(assistantBlocks, anthropic.NewToolUseBlock(b.ID, json.RawMessage(b.Input), b.Name))
+				out, execErr := exec(ctx, b.Name, b.Input)
+				isErr := execErr != nil
+				if isErr {
+					out = execErr.Error()
+				}
+				toolResults = append(toolResults, anthropic.NewToolResultBlock(b.ID, clip(out, maxToolResultBytes), isErr))
+			}
+		}
+		if len(toolResults) == 0 {
+			// stop_reason said tool_use but no ToolUseBlock was found — return
+			// whatever text there was rather than looping forever.
+			return textOf(resp)
+		}
+		params.Messages = append(params.Messages, anthropic.NewAssistantMessage(assistantBlocks...))
+		params.Messages = append(params.Messages, anthropic.NewUserMessage(toolResults...))
+	}
+	return "", fmt.Errorf("llm: tool-use loop did not finish within %d turns", maxTurns)
+}
+
+// callOnce is a single non-streaming Messages.New call bounded by callTimeout
+// — the building block CompleteAgentic repeats per tool-use turn.
+func (c *Client) callOnce(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	resp, err := c.anth.Messages.New(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("llm: message create: %w", err)
+	}
+	return resp, nil
+}
+
+// clip bounds s to n bytes, keeping the end (a tool result's most useful part
+// — a file's tail, a diff's actual changes, a grep's last matches — usually
+// isn't the start).
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…\n" + s[len(s)-n:]
 }
 
 func (c *Client) params(system, user string) anthropic.MessageNewParams {

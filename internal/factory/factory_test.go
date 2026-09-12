@@ -193,8 +193,8 @@ func TestParseFindings(t *testing.T) {
 
 func TestTestEngineerRole(t *testing.T) {
 	for _, in := range []string{"test", "qa", "test-engineer", "Test Engineer", "integration"} {
-		if got := normalizeRole(in); got != RoleTestEngineer {
-			t.Errorf("normalizeRole(%q) = %q, want test-engineer", in, got)
+		if got := NormalizeRole(in); got != RoleTestEngineer {
+			t.Errorf("NormalizeRole(%q) = %q, want test-engineer", in, got)
 		}
 	}
 	if IsDeveloperRole(RoleTestEngineer) {

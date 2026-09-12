@@ -29,6 +29,7 @@ import (
 
 	"github.com/nzin/ai-software-factory/internal/agentkit"
 	"github.com/nzin/ai-software-factory/internal/factory"
+	"github.com/nzin/ai-software-factory/internal/llm"
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
@@ -38,6 +39,22 @@ const maxContextBytes = 40_000
 type Completer interface {
 	Complete(ctx context.Context, system, user string) (string, error)
 }
+
+// AgenticCompleter is a Completer that can also run a bounded tool-use loop.
+// The real *llm.Client satisfies this automatically (it has both methods); a
+// test stub implementing only Completer does not, and is used exactly as
+// before. A fix pass (env.Attempt > 0) uses this when available, so it can
+// check a finding against the actual repo/history before answering, rather
+// than only the flattened current-file snapshot and the finding's own
+// (possibly wrong) title/suggestion.
+type AgenticCompleter interface {
+	Completer
+	CompleteAgentic(ctx context.Context, system, user string, tools []llm.Tool, exec llm.ToolExecFunc, maxTurns int) (string, error)
+}
+
+// maxFixPassToolTurns bounds a fix pass's tool-use loop (0 would fall back to
+// llm.Client's own default).
+const maxFixPassToolTurns = 8
 
 const outputContract = "\n" + `Return ONLY the files to write, each as a block. No prose, no JSON, no markdown
 fences around the blocks:
@@ -132,12 +149,24 @@ func run(ctx context.Context, client Completer, systemPrompt string, env factory
 	return runOnce(ctx, client, systemPrompt, env, repo, o)
 }
 
-// runOnce asks the model for every file in one call and makes one commit.
+// runOnce asks the model for every file in one call and makes one commit. A
+// fix pass (env.Attempt > 0) uses the agentic tool-use path when the client
+// supports it (see AgenticCompleter) — attempt 0 (a from-scratch build) has
+// nothing to investigate yet, so it always uses the plain path.
 func runOnce(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, repo *workspace.Repo, o options) (factory.ResultEnvelope, error) {
 	tree, _ := repo.Tree(ctx)
-	user := buildPrompt(env, repo.Dir, tree)
+	ac, agentic := client.(AgenticCompleter)
+	agentic = agentic && env.Attempt > 0
+	user := buildPrompt(ctx, env, repo, tree, agentic)
 
-	files, out, err := completeFiles(ctx, client, systemPrompt, user, env.Stage)
+	var files map[string]string
+	var out string
+	var err error
+	if agentic {
+		files, out, err = completeFilesAgentic(ctx, ac, systemPrompt, user, env.Stage, repo)
+	} else {
+		files, out, err = completeFiles(ctx, client, systemPrompt, user, env.Stage)
+	}
 	var trunc *truncatedError
 	if errors.As(err, &trunc) {
 		err = nil // usable partial: commit what arrived, note it below
@@ -252,7 +281,7 @@ func runBatched(ctx context.Context, client Completer, systemPrompt string, env 
 	}, nil
 }
 
-func buildPrompt(env factory.DispatchEnvelope, dir string, tree []string) string {
+func buildPrompt(ctx context.Context, env factory.DispatchEnvelope, repo *workspace.Repo, tree []string, agentic bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# PRD\n\n%s\n\n", env.PRDText)
 	if env.Plan != "" {
@@ -262,11 +291,28 @@ func buildPrompt(env factory.DispatchEnvelope, dir string, tree []string) string
 		fmt.Fprintf(&b, "# UI/UX spec\n\n%s\n\n", env.UISpec)
 	}
 	if env.Attempt > 0 && len(env.Findings) > 0 {
-		fmt.Fprintf(&b, "# Fix pass (attempt %d)\n\nThe previous version was reviewed. Fix these findings; keep everything else working.\nA `gosec` finding that is a genuine false positive for this PRD may be resolved\nwith a `// #nosec Gxxx -- <reason>` comment on the flagged line instead of a code\nchange — see your role prompt.\n\n", env.Attempt+1)
+		fmt.Fprintf(&b, "# Fix pass (attempt %d)\n\nThe previous version was reviewed. A finding's title/suggestion is the\nreviewer's paraphrase, not ground truth — before changing anything, check it\nagainst the evidence quoted below and against the referenced file/line as they\nactually are right now. If the referenced code already does what a finding\nasks, that finding's premise is likely wrong or stale: the real cause is\nprobably elsewhere (a different component, an interaction/state bug) — trace\nit rather than re-editing code that's already correct. Once you're confident\nyou've found the real cause, fix it with the smallest change that does the\njob; do not rewrite files or components beyond what's needed, and keep\neverything else working.\nA `gosec` finding that is a genuine false positive for this PRD may be resolved\nwith a `// #nosec Gxxx -- <reason>` comment on the flagged line instead of a code\nchange — see your role prompt.\n\n", env.Attempt+1)
+		if agentic {
+			b.WriteString("You have read-only tools available (read_file, git_log, git_diff, grep) — " +
+				"use them to check a finding against the actual file/test before acting on it, or to " +
+				"pull in a file the snapshot below omitted for length. Investigate only as much as you " +
+				"need; once you're confident, stop calling tools and answer with the file blocks " +
+				"described at the end of this prompt — do not narrate your investigation in prose.\n\n")
+		}
 		for _, f := range env.Findings {
 			fmt.Fprintf(&b, "- [%s]%s %s:%d — %s\n", f.Severity, findingTag(f), f.File, f.Line, f.Title)
 			if f.Suggestion != "" {
 				fmt.Fprintf(&b, "  fix: %s\n", f.Suggestion)
+			}
+			if f.Evidence != "" {
+				fmt.Fprintf(&b, "  evidence (verbatim from the actual failure — check the title/fix above actually match this before acting on them):\n    %s\n",
+					strings.ReplaceAll(strings.TrimSpace(f.Evidence), "\n", "\n    "))
+			}
+			if f.File != "" {
+				if log, err := repo.LogPath(ctx, f.File, 5); err == nil && log != "" {
+					fmt.Fprintf(&b, "  history of %s this run (newest first — has a previous attempt already touched this?):\n    %s\n",
+						f.File, strings.ReplaceAll(log, "\n", "\n    "))
+				}
 			}
 		}
 		b.WriteString("\n")
@@ -282,7 +328,7 @@ func buildPrompt(env factory.DispatchEnvelope, dir string, tree []string) string
 		}
 	}
 	b.WriteString("\n# Current repository\n\n")
-	writeRepoSnapshot(&b, dir, tree)
+	writeRepoSnapshot(&b, repo.Dir, tree)
 	b.WriteString("\n")
 	b.WriteString(outputContract)
 	return b.String()
@@ -331,13 +377,25 @@ func writeRepoSnapshot(b *strings.Builder, dir string, tree []string) {
 	b.WriteString(existingContent(dir, tree))
 }
 
+// rawFailuresPrefix is build-gate's raw-failure-log directory (see
+// factory.RawFailuresDir) plus a trailing separator, so existingContent can
+// recognise paths under it with a plain prefix check.
+var rawFailuresPrefix = factory.RawFailuresDir + "/"
+
 // existingContent inlines the current files up to a byte budget so the agent can
-// extend rather than clobber prior work.
+// extend rather than clobber prior work. Build-gate's raw failure logs are
+// deliberately excluded: they're for on-demand reading (a human browsing the
+// branch, or the agentic fix-pass's read_file tool), not for being stuffed
+// into every prompt regardless of relevance — they can be large and would
+// otherwise crowd real source files out of the byte budget.
 func existingContent(dir string, tree []string) string {
 	sort.Strings(tree)
 	var b strings.Builder
 	used := 0
 	for _, rel := range tree {
+		if strings.HasPrefix(rel, rawFailuresPrefix) {
+			continue
+		}
 		data, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {
 			continue
@@ -383,7 +441,33 @@ func (e *truncatedError) Error() string {
 // A *truncatedError is returned alongside a non-empty file map when the reply
 // was cut off mid-block — the caller commits what arrived and moves on.
 func completeFiles(ctx context.Context, client Completer, system, user, stage string) (map[string]string, string, error) {
-	out, err := client.Complete(ctx, system, user)
+	return completeFilesWith(stage, user, func(u string) (string, error) {
+		return client.Complete(ctx, system, u)
+	})
+}
+
+// completeFilesAgentic is completeFiles with a bounded, read-only tool-use
+// loop available to the model (see fixPassTools/toolExecFunc) — used for a
+// fix pass so it can check a finding against the actual repo and its own
+// prior attempts before answering, not only the finding's own text and the
+// flattened current-file snapshot every prompt already carries.
+func completeFilesAgentic(ctx context.Context, client AgenticCompleter, system, user, stage string, repo *workspace.Repo) (map[string]string, string, error) {
+	tools, exec := fixPassTools(), toolExecFunc(repo)
+	return completeFilesWith(stage, user, func(u string) (string, error) {
+		return client.CompleteAgentic(ctx, system, u, tools, exec, maxFixPassToolTurns)
+	})
+}
+
+// completeFilesWith drives one completion (plain or agentic — complete does
+// the actual model call) and retries once when the reply is neither the block
+// format, a JSON array, nor the "NO CHANGES" sentinel. Models occasionally
+// answer a fix-pass prompt in prose ("the findings are already addressed");
+// one strict retry is much cheaper than failing the run.
+//
+// A *truncatedError is returned alongside a non-empty file map when the reply
+// was cut off mid-block — the caller commits what arrived and moves on.
+func completeFilesWith(stage, user string, complete func(u string) (string, error)) (map[string]string, string, error) {
+	out, err := complete(user)
 	if err != nil {
 		return nil, "", err
 	}
@@ -393,7 +477,7 @@ func completeFiles(ctx context.Context, client Completer, system, user, stage st
 	log.Printf("devagent(%s): unusable reply (%d bytes, starts %q) — retrying once",
 		stage, len(out), head(out, 120))
 
-	retry, err := client.Complete(ctx, system, user+"\n\n"+retryContract)
+	retry, err := complete(user + "\n\n" + retryContract)
 	if err != nil {
 		return nil, "", err
 	}

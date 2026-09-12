@@ -437,6 +437,30 @@ func (r *Repo) Diff(ctx context.Context) (string, error) {
 	return git(ctx, r.Dir, "diff", mb)
 }
 
+// LogPath returns the one-line commit log for a single path (most recent
+// first, newest `limit` commits), across the whole run — including commits
+// from earlier fix-pass attempts that a later attempt superseded or undid. It
+// exists so a fix pass can see whether it (or a prior attempt) already touched
+// this file, and how, before rewriting it again.
+func (r *Repo) LogPath(ctx context.Context, path string, limit int) (string, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	out, err := git(ctx, r.Dir, "log", fmt.Sprintf("-n%d", limit), "--oneline", "--", path)
+	return strings.TrimSpace(out), err
+}
+
+// DiffPath returns the cumulative unified diff of a single path against the
+// base branch (i.e. everything this run has changed there so far, across all
+// attempts).
+func (r *Repo) DiffPath(ctx context.Context, path string) (string, error) {
+	mb := r.mergeBase(ctx)
+	if mb == "" {
+		return "", nil
+	}
+	return git(ctx, r.Dir, "diff", mb, "--", path)
+}
+
 // ChangedFiles lists files changed against the base branch.
 func (r *Repo) ChangedFiles(ctx context.Context) ([]string, error) {
 	mb := r.mergeBase(ctx)

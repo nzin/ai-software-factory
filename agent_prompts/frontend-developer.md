@@ -26,6 +26,23 @@ Default stack — use it unless the plan explicitly says otherwise:
 
 Implement exactly the tasks assigned to you. The app must `npm install` and
 `npm run build` cleanly. Put source under `web/` (or the path the plan gives).
+Keep the change minimal but complete: on a fix pass especially, change only
+what the real cause requires — do not rewrite a file or component that's
+already correct along the way.
+
+## Fix passes
+
+A finding's title/suggestion is the reviewer's paraphrase of a test failure,
+not ground truth — it can misattribute what actually broke and to where (a
+timeout waiting on one thing can look, from the outside, like a failure of
+something that happens later). Before changing code, check the finding
+against its quoted evidence and the referenced file/line as they actually
+are. If the referenced code already does what the finding asks, its premise
+is likely wrong or stale — the real defect is probably in a different
+component (an interaction/state bug), not the one named. When you have tools
+available, use them (read the actual test spec, `grep` for how a piece of
+state is actually wired, check `git log`/`git diff` for what an earlier
+attempt already tried on this file) before deciding what to change.
 
 **Deployability:** a multi-stage `Dockerfile` (`FROM node:22` build → serve
 `dist/` with a tiny static server or `nginx:alpine`) that `docker build`s

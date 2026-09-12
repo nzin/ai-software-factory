@@ -196,11 +196,18 @@ type Run struct {
 	PlanFeedback string                    `json:"planFeedback,omitempty"` // human note for the next planner pass; consumed once
 
 	// Loop state.
-	Findings []Finding      `json:"findings,omitempty"`
-	Tasks    []Task         `json:"tasks,omitempty"`
-	Events   []Event        `json:"events,omitempty"`
-	Attempts map[string]int `json:"attempts,omitempty"`
-	PausedAt time.Time      `json:"pausedAt,omitempty"`
+	Findings []Finding `json:"findings,omitempty"` // every finding raised across the whole run's history — for display
+	// LastRoundFindings is only the findings from whichever gate/reviewer/human
+	// round most recently bumped an Attempts counter — what actually triggered
+	// the run's current retry. A developer's fix-pass dispatch is scoped to
+	// this, not the full Findings history, so a retry isn't handed
+	// possibly-already-resolved findings from several rounds back alongside
+	// the ones that are actually current.
+	LastRoundFindings []Finding      `json:"lastRoundFindings,omitempty"`
+	Tasks             []Task         `json:"tasks,omitempty"`
+	Events            []Event        `json:"events,omitempty"`
+	Attempts          map[string]int `json:"attempts,omitempty"`
+	PausedAt          time.Time      `json:"pausedAt,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

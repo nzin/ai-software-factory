@@ -558,6 +558,10 @@ func init() {
         "category": {
           "type": "string"
         },
+        "evidence": {
+          "description": "verbatim excerpt of the actual failure the title/suggestion were derived from",
+          "type": "string"
+        },
         "file": {
           "type": "string"
         },
@@ -1582,6 +1586,10 @@ func init() {
       "type": "object",
       "properties": {
         "category": {
+          "type": "string"
+        },
+        "evidence": {
+          "description": "verbatim excerpt of the actual failure the title/suggestion were derived from",
           "type": "string"
         },
         "file": {

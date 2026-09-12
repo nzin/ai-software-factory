@@ -8,6 +8,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -20,6 +23,8 @@ import (
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
+var rawFailureKindRe = regexp.MustCompile(`[^a-z0-9]+`)
+
 const maxDiffBytes = 80_000
 
 const outputContract = `
@@ -28,13 +33,20 @@ Output ONLY a JSON array of findings — the smallest set a developer can act on
 [
   { "severity": "high", "category": "compile", "file": "path", "line": 12,
     "title": "the one-line root cause", "suggestion": "the concrete fix",
-    "targetRole": "backend" }
+    "evidence": "the verbatim lines from the output below that this finding is
+    based on — the actual error/assertion/call-log text, not your paraphrase of
+    it", "targetRole": "backend" }
 ]
 
 Rules:
 - Collapse a cascade of errors from one root cause into ONE finding at the
   definition site. Do not emit a finding per downstream error.
 - Keep the real file:line from the output. Never invent a file or line.
+- evidence is mandatory and must be copied verbatim from the raw output you were
+  given — never invent or paraphrase it there. Before writing title/suggestion,
+  re-read the evidence you are about to quote and check your title actually
+  matches what it says (e.g. what triggered it, and at what point in the test it
+  happened) — do not describe a scenario the evidence doesn't support.
 - severity is one of: critical, high, medium, low, info. Use high for anything
   that breaks the build, the deploy, or a component test.
 - targetRole is backend, frontend, or mobile — whichever owns the failing code.
@@ -77,6 +89,15 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			}
 		}
 
+		if rawPaths, err := writeRawFailures(repo.Dir, res.Failures); err == nil && len(rawPaths) > 0 {
+			if err := repo.AddPaths(ctx, rawPaths); err == nil {
+				if sha, err := repo.Commit(ctx, env.Stage, "attach raw failure logs"); err == nil && sha != "" {
+					commitSHA = sha
+					filesWritten = append(filesWritten, rawPaths...)
+				}
+			}
+		}
+
 		return factory.ResultEnvelope{
 			Role:         env.Stage,
 			Summary:      fmt.Sprintf("%s (%d findings)", res.Summary, len(findings)),
@@ -87,6 +108,35 @@ func Executor(client *llm.Client, systemPrompt string) a2asrv.AgentExecutor {
 			FilesWritten: filesWritten,
 		}, nil
 	})
+}
+
+// writeRawFailures persists each failed command's full (already-clipped) raw
+// output to <dir>/build-gate-raw/<kind>.log, one stable path per kind so repeat
+// runs overwrite rather than accumulate. This is the text the LLM "tighten"
+// pass summarized into findings — kept around so a wrong or incomplete
+// summary can still be checked against what actually happened, by a human
+// resuming a stuck run or by a tool-using developer fix pass.
+func writeRawFailures(dir string, failures []bg.Failure) ([]string, error) {
+	if len(failures) == 0 {
+		return nil, nil
+	}
+	rawDir := filepath.Join(dir, factory.RawFailuresDir)
+	if err := os.MkdirAll(rawDir, 0o755); err != nil {
+		return nil, err
+	}
+	var written []string
+	for _, f := range failures {
+		slug := strings.Trim(rawFailureKindRe.ReplaceAllString(strings.ToLower(f.Kind), "-"), "-")
+		if slug == "" {
+			slug = "failure"
+		}
+		rel := filepath.Join(factory.RawFailuresDir, slug+".log")
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(f.Output), 0o644); err != nil {
+			return written, err
+		}
+		written = append(written, filepath.ToSlash(rel))
+	}
+	return written, nil
 }
 
 // refreshHarness re-lays the factory-owned test harness before the checks run,

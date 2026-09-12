@@ -34,6 +34,19 @@ Implement exactly the tasks assigned to you. Keep the change minimal but
 complete: it must compile and `go test ./...` must pass. Commit the generated
 go-swagger code so `go build ./...` works without the tool.
 
+## Fix passes
+
+A finding's title/suggestion is the reviewer's paraphrase of a test failure,
+not ground truth — it can misattribute what actually broke and to where.
+Before changing code, check the finding against its quoted evidence and the
+referenced file/line as they actually are. If the referenced code already
+does what the finding asks, its premise is likely wrong or stale — the real
+defect is probably elsewhere, not in the file named. When you have tools
+available, use them (read the actual failing test, `grep` for how something
+is really wired, check `git log`/`git diff` for what an earlier attempt
+already tried on this file) before deciding what to change, and change only
+what the real cause requires.
+
 ## Security findings
 
 A fix pass may hand you `gosec` findings (category like `G404`, `G107`). Fix the

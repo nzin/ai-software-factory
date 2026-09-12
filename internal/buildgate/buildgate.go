@@ -179,6 +179,7 @@ func parseGoErrors(out string) []factory.Finding {
 			Line:       atoi(m[2]),
 			Title:      truncate(m[3], 200),
 			Suggestion: "fix the compile error so `go build ./...` and `go test ./...` pass",
+			Evidence:   strings.TrimSpace(line),
 			TargetRole: factory.RoleForPath(file),
 		})
 		if len(findings) >= 20 {
@@ -286,6 +287,7 @@ func (c *checker) checkCompose(ctx context.Context, dir string) {
 			File:       file,
 			Title:      "docker-compose.yml is not valid",
 			Suggestion: tail(out, maxDetail),
+			Evidence:   tail(out, maxDetail),
 			TargetRole: factory.RoleBackendDeveloper,
 		})
 	}
@@ -374,19 +376,27 @@ func componentReport(ctx context.Context, dir string, env []string, compose func
 }
 
 // componentFinding is the deterministic finding for a failed run: the FAIL
-// lines when the suites reported any — routed to frontend when every failure
-// is an [e2e] one — else the tail of the report.
+// blocks when the suites reported any — routed to frontend when every failure
+// is an [e2e] one — else the tail of the report. Each block keeps its
+// asf-reporter.cjs detail (the `at file:line` and the first lines of the real
+// error/call log), not just the one-line "FAIL [...]:" summary, so the
+// location and cause survive into the finding even without an LLM pass.
 func componentFinding(testerLog, report string) factory.Finding {
 	var fails []string
 	apiFailed := false
-	for _, ln := range strings.Split(testerLog, "\n") {
-		i := strings.Index(ln, "FAIL [")
-		if i < 0 {
+	lines := strings.Split(testerLog, "\n")
+	for i := 0; i < len(lines); i++ {
+		idx := strings.Index(lines[i], "FAIL [")
+		if idx < 0 {
 			continue
 		}
-		ln = strings.TrimSpace(ln[i:])
-		apiFailed = apiFailed || strings.HasPrefix(ln, "FAIL [api]")
-		fails = append(fails, ln)
+		block := []string{strings.TrimSpace(lines[i][idx:])}
+		apiFailed = apiFailed || strings.HasPrefix(block[0], "FAIL [api]")
+		for i+1 < len(lines) && strings.HasPrefix(lines[i+1], "    ") {
+			i++
+			block = append(block, strings.TrimSpace(lines[i]))
+		}
+		fails = append(fails, strings.Join(block, "\n"))
 	}
 	f := factory.Finding{
 		Source:     "build-gate",
@@ -394,11 +404,14 @@ func componentFinding(testerLog, report string) factory.Finding {
 		Category:   "component-test",
 		Title:      "component tests failed against the running stack",
 		Suggestion: tail(report, maxDetail),
+		Evidence:   tail(report, maxDetail),
 		TargetRole: factory.RoleBackendDeveloper,
 	}
 	if len(fails) > 0 {
 		f.Title = fmt.Sprintf("%d component test(s) failed against the running stack", len(fails))
-		f.Suggestion = tail(strings.Join(fails, "\n"), maxDetail)
+		joined := strings.Join(fails, "\n\n")
+		f.Suggestion = tail(joined, maxDetail)
+		f.Evidence = tail(joined, maxDetail)
 		if !apiFailed {
 			f.TargetRole = factory.RoleFrontendDev
 		}
@@ -427,6 +440,7 @@ func stackBuildFinding(dir, out string) factory.Finding {
 		Category:   "deploy",
 		Title:      truncate("docker compose build failed: "+cause, 200),
 		Suggestion: tail(out, maxDetail),
+		Evidence:   tail(out, maxDetail),
 		TargetRole: factory.RoleBackendDeveloper,
 	}
 	builds := composeBuilds(dir)
@@ -595,6 +609,7 @@ func buildFinding(title, output, role string) factory.Finding {
 		Category:   "build",
 		Title:      title,
 		Suggestion: tail(output, maxDetail),
+		Evidence:   tail(output, maxDetail),
 		TargetRole: role,
 	}
 }

@@ -1,7 +1,15 @@
 package llm
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/nzin/ai-software-factory/internal/modelext"
 )
@@ -66,5 +74,98 @@ func TestHasToolIgnoresOtherKeys(t *testing.T) {
 	c := New(modelext.Config{Model: "claude-sonnet-5", Params: map[string]any{"foo": "bar"}})
 	if c.hasTool("web_search") {
 		t.Fatal("hasTool(web_search) = true with no tools key")
+	}
+}
+
+// scriptedMessagesServer scripts POST /v1/messages: each call in order returns
+// the next body in bodies; calling past the end repeats the last one.
+func scriptedMessagesServer(t *testing.T, bodies []string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotImplemented)
+			return
+		}
+		n := int(calls.Add(1)) - 1
+		if n >= len(bodies) {
+			n = len(bodies) - 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(bodies[n]))
+	}))
+	t.Cleanup(server.Close)
+	return server, &calls
+}
+
+func testAgenticClient(server *httptest.Server) *Client {
+	return New(modelext.Config{Model: "claude-sonnet-5"},
+		option.WithBaseURL(server.URL),
+		option.WithAPIKey("test-key"),
+		option.WithMaxRetries(0),
+	)
+}
+
+var echoTool = Tool{
+	Name:        "echo",
+	Description: "echoes its input back",
+	Properties:  map[string]any{"msg": map[string]any{"type": "string"}},
+	Required:    []string{"msg"},
+}
+
+func TestCompleteAgenticRunsToolThenReturnsFinalText(t *testing.T) {
+	server, calls := scriptedMessagesServer(t, []string{
+		`{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"echo","input":{"msg":"hi"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`,
+		`{"id":"msg_2","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`,
+	})
+	c := testAgenticClient(server)
+
+	var gotName string
+	var gotInput json.RawMessage
+	exec := func(ctx context.Context, name string, input json.RawMessage) (string, error) {
+		gotName, gotInput = name, input
+		return "echoed: hi", nil
+	}
+
+	out, err := c.CompleteAgentic(context.Background(), "sys", "user", []Tool{echoTool}, exec, 4)
+	if err != nil {
+		t.Fatalf("CompleteAgentic: %v", err)
+	}
+	if out != "done" {
+		t.Fatalf("out = %q, want %q", out, "done")
+	}
+	if gotName != "echo" {
+		t.Fatalf("tool exec called with name %q, want %q", gotName, "echo")
+	}
+	if !strings.Contains(string(gotInput), `"msg":"hi"`) {
+		t.Fatalf("tool exec input = %s, want it to contain msg:hi", gotInput)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 calls to /v1/messages (one tool turn + one final), got %d", calls.Load())
+	}
+}
+
+func TestCompleteAgenticStopsAtMaxTurns(t *testing.T) {
+	// Always answers tool_use — a model that never stops calling tools must
+	// not loop forever; CompleteAgentic should give up after maxTurns.
+	server, calls := scriptedMessagesServer(t, []string{
+		`{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"echo","input":{"msg":"hi"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`,
+	})
+	c := testAgenticClient(server)
+
+	exec := func(ctx context.Context, name string, input json.RawMessage) (string, error) {
+		return "ok", nil
+	}
+
+	_, err := c.CompleteAgentic(context.Background(), "sys", "user", []Tool{echoTool}, exec, 3)
+	if err == nil {
+		t.Fatal("expected an error when the tool-use loop never finishes, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not finish within 3 turns") {
+		t.Fatalf("error = %v, want it to mention the turn cap", err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("expected exactly 3 calls to /v1/messages (the turn cap), got %d", calls.Load())
 	}
 }

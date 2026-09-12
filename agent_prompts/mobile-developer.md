@@ -22,3 +22,13 @@ Default stack — use it unless the plan explicitly says otherwise:
   appear in `docker-compose.yml`.
 
 Implement exactly the tasks assigned to you; keep it minimal and buildable.
+
+## Fix passes
+
+A finding's title/suggestion is the reviewer's paraphrase of a test failure,
+not ground truth. Before changing code, check it against its quoted evidence
+and the referenced file/line as they actually are — if the referenced code
+already does what the finding asks, the real defect is probably elsewhere.
+When you have tools available, use them (read the actual failing test,
+`grep`, `git log`/`git diff` on the file) before deciding what to change, and
+change only what the real cause requires.

@@ -2,21 +2,52 @@ package devagent
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/nzin/ai-software-factory/internal/factory"
+	"github.com/nzin/ai-software-factory/internal/llm"
 	"github.com/nzin/ai-software-factory/internal/workspace"
 )
 
 // fakeCompleter returns a canned reply per call and records the prompts it saw.
+// It implements only Completer (not AgenticCompleter) — a fix pass given one
+// of these must fall back to the plain, non-tool-using path.
 type fakeCompleter struct {
 	replies []string
 	calls   []string
 }
 
 func (f *fakeCompleter) Complete(_ context.Context, _, user string) (string, error) {
+	f.calls = append(f.calls, user)
+	i := len(f.calls) - 1
+	if i < len(f.replies) {
+		return f.replies[i], nil
+	}
+	return "[]", nil
+}
+
+// fakeAgenticCompleter additionally implements CompleteAgentic: it calls the
+// "read_file" tool once (recording what it got back) before returning its
+// canned reply, so a test can assert a fix pass actually took the agentic
+// path and that the tool exec function it was given works against the real
+// repo.
+type fakeAgenticCompleter struct {
+	fakeCompleter
+	agenticCalls int
+	gotTools     []llm.Tool
+	toolResult   string
+	toolErr      error
+}
+
+func (f *fakeAgenticCompleter) CompleteAgentic(ctx context.Context, _, user string, tools []llm.Tool, exec llm.ToolExecFunc, _ int) (string, error) {
+	f.agenticCalls++
+	f.gotTools = tools
+	if exec != nil {
+		f.toolResult, f.toolErr = exec(ctx, "read_file", json.RawMessage(`{"path":"main.go"}`))
+	}
 	f.calls = append(f.calls, user)
 	i := len(f.calls) - 1
 	if i < len(f.replies) {
@@ -219,6 +250,98 @@ func TestExecutorFixPassIsSingleCall(t *testing.T) {
 	}
 	if got.CommitSHA == "" {
 		t.Fatal("CommitSHA empty")
+	}
+}
+
+// A fix pass given a client that implements AgenticCompleter must use the
+// tool-use path (CompleteAgentic, not Complete), offer it the fixPassTools
+// set, and its tool exec function must actually work against the real repo —
+// this is the mechanism a fix pass relies on to check a finding against the
+// current file/history instead of only the finding's own (possibly wrong)
+// text.
+func TestExecutorFixPassUsesAgenticPathWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	if _, err := repo.WriteFiles(map[string]string{"main.go": "package main\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Commit(ctx, "backend-developer", "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	env := factory.DispatchEnvelope{
+		Stage:        factory.RoleBackendDeveloper,
+		WorkspaceDir: repo.Dir,
+		BaseBranch:   "main",
+		Attempt:      1,
+		Findings: []factory.Finding{
+			{Severity: "high", TargetRole: "backend", File: "main.go", Line: 1, Title: "some finding"},
+		},
+	}
+	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{
+		"=== FILE: main.go ===\npackage main // fixed\n=== END FILE: main.go ===\n",
+	}}}
+
+	got, err := run(ctx, ac, "sys", env, options{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if ac.agenticCalls != 1 {
+		t.Fatalf("CompleteAgentic calls = %d, want 1 (fix pass should use the agentic path)", ac.agenticCalls)
+	}
+	var toolNames []string
+	for _, tl := range ac.gotTools {
+		toolNames = append(toolNames, tl.Name)
+	}
+	for _, want := range []string{"read_file", "git_log", "git_diff", "grep"} {
+		found := false
+		for _, n := range toolNames {
+			found = found || n == want
+		}
+		if !found {
+			t.Fatalf("fixPassTools() = %v, missing %q", toolNames, want)
+		}
+	}
+	if ac.toolErr != nil {
+		t.Fatalf("exec(read_file, main.go) failed: %v", ac.toolErr)
+	}
+	if !strings.Contains(ac.toolResult, "package main") {
+		t.Fatalf("exec(read_file, main.go) = %q, want it to contain the seeded file's content", ac.toolResult)
+	}
+	if !strings.Contains(ac.calls[0], "read_file, git_log, git_diff, grep") {
+		t.Fatalf("fix-pass prompt missing tool-availability note:\n%s", ac.calls[0])
+	}
+	if got.CommitSHA == "" {
+		t.Fatal("CommitSHA empty")
+	}
+}
+
+// Attempt 0 (a from-scratch build) has nothing to investigate yet, so it must
+// use the plain path even when the client supports CompleteAgentic.
+func TestExecutorAttemptZeroNeverUsesAgenticPath(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage:        factory.RoleBackendDeveloper,
+		WorkspaceDir: repo.Dir,
+		BaseBranch:   "main",
+		PRDText:      "build a quote service",
+		Tasks:        []factory.PlanTask{{ID: "T1", Title: "only task"}},
+	}
+	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{
+		"=== FILE: main.go ===\npackage main\n=== END FILE: main.go ===\n",
+	}}}
+
+	if _, err := run(ctx, ac, "sys", env, options{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if ac.agenticCalls != 0 {
+		t.Fatalf("CompleteAgentic calls = %d, want 0 on attempt 0", ac.agenticCalls)
+	}
+	if len(ac.calls) != 1 {
+		t.Fatalf("Complete calls = %d, want 1", len(ac.calls))
 	}
 }
 

@@ -189,7 +189,7 @@ func (e *pipelineEngine) dispatchEnvelope(ctx context.Context, run *Run) (factor
 		Attempt:      run.Attempts[role],
 	}
 	if factory.IsDeveloperRole(role) && env.Attempt > 0 {
-		env.Findings = findingsForRole(run.Findings, role)
+		env.Findings = findingsForRole(run.LastRoundFindings, role)
 	}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(env))
 	msg.ContextID = run.ContextID
@@ -202,12 +202,22 @@ func (e *pipelineEngine) dispatchEnvelope(ctx context.Context, run *Run) (factor
 }
 
 // findingsForRole returns the findings a fix pass for role should address:
-// those explicitly targeting it, plus any untargeted high/critical ones.
+// those explicitly targeting it, plus any untargeted high/critical ones. The
+// caller passes only the triggering round's findings (run.LastRoundFindings),
+// not the run's whole history — a retry should see what just failed, not
+// every finding raised across every earlier round too, some of which may
+// already be resolved.
 func findingsForRole(all []Finding, role string) []Finding {
+	role = factory.NormalizeRole(role)
 	var out []Finding
 	for _, f := range all {
-		t := f.TargetRole
-		if t == role || t == "" || (t != "" && !factory.IsDeveloperRole(t)) {
+		// Findings are commonly targeted with a role shorthand ("frontend",
+		// "backend") rather than the full stage name ("frontend-developer")
+		// that `role` here always is — normalize both before comparing, or a
+		// legitimately-targeted finding falls through to the "not a developer
+		// role, so untargeted" branch below and gets handed to every role.
+		t := factory.NormalizeRole(f.TargetRole)
+		if t == role || t == "" || !factory.IsDeveloperRole(t) {
 			out = append(out, f)
 		}
 	}

@@ -601,6 +601,9 @@ definitions:
         type: string
       suggestion:
         type: string
+      evidence:
+        type: string
+        description: verbatim excerpt of the actual failure the title/suggestion were derived from
       targetRole:
         type: string
 

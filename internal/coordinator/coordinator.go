@@ -394,6 +394,7 @@ func (o *Orchestrator) Resume(ctx context.Context, id string, opts ResumeOptions
 		// dispatch carries it into the "# Fix pass" prompt block.
 		f := Finding{Source: "human", Severity: "high", Title: comment, TargetRole: opts.TargetRole}
 		run.Findings = append(run.Findings, f)
+		run.LastRoundFindings = []Finding{f}
 		target := factory.RouteRole([]Finding{f}, run.lastDeveloper())
 		run.Attempts[target] = 1
 		run.Stage = target
@@ -539,6 +540,7 @@ func (o *Orchestrator) review(ctx context.Context, id, decision string, comments
 			return run, fmt.Errorf("coordinator: request_changes needs at least one non-empty comment")
 		}
 		run.Findings = append(run.Findings, fresh...)
+		run.LastRoundFindings = fresh
 
 		target := factory.RouteRole(fresh, run.lastDeveloper())
 		if run.Attempts == nil {
@@ -762,6 +764,7 @@ func (o *Orchestrator) drive(ctx context.Context, run *Run) {
 		task.Findings = res.Findings
 		run.Tasks = append(run.Tasks, task)
 		run.Findings = mergeFindings(run.Findings, res.Findings)
+		run.LastRoundFindings = res.Findings
 		run.UpdatedAt = time.Now().UTC()
 
 		switch {
