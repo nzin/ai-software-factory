@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { approveRun, deleteRun, getRun, rejectRun, resumeRun, reviewRun } from '@/api/runs'
+import { approveRun, deleteRun, getRun, prdAttachmentURL, rejectRun, resumeRun, reviewRun } from '@/api/runs'
 import { apiError, notifyError } from '@/api/client'
 import { usePolling } from '@/composables/usePolling'
 import StatusTag from '@/components/StatusTag.vue'
@@ -25,6 +25,10 @@ const { data, error, loading, refresh } = usePolling(() => getRun(id), {
 const run = computed(() => data.value ?? {})
 const tab = ref('timeline')
 const busy = ref(false)
+
+const prdAttachmentURLs = computed(() =>
+  (run.value.prd?.attachments ?? []).map((a) => prdAttachmentURL(id, a.path)),
+)
 
 const canApprove = computed(() => run.value.status === 'awaiting_approval')
 const canResume = computed(() => ['needs_human_review', 'failed'].includes(run.value.status))
@@ -196,6 +200,19 @@ const removeComment = (i) => review.comments.splice(i, 1)
             <code class="small">{{ run.workspaceDir || '—' }}</code>
           </el-descriptions-item>
         </el-descriptions>
+
+        <div v-if="prdAttachmentURLs.length" class="attachments">
+          <div class="attachments-label">Evidence ({{ prdAttachmentURLs.length }})</div>
+          <el-image
+            v-for="(url, i) in prdAttachmentURLs"
+            :key="url"
+            :src="url"
+            :preview-src-list="prdAttachmentURLs"
+            :initial-index="i"
+            fit="cover"
+            class="shot"
+          />
+        </div>
 
         <el-alert v-if="run.reason" class="reason" type="info" :closable="false" :title="run.reason" />
 
@@ -380,6 +397,12 @@ const removeComment = (i) => review.comments.splice(i, 1)
 .alert { margin: 12px 0; }
 .header { margin: 16px 0; }
 .reason { margin-top: 12px; }
+.attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.attachments-label { font-size: 12px; color: var(--el-text-color-secondary); margin-right: 4px; }
+.attachments .shot {
+  width: 72px; height: 72px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--el-border-color);
+}
 .actions { margin-top: 16px; display: flex; gap: 10px; }
 .tabs { margin-top: 8px; }
 .dim { color: var(--el-text-color-secondary); }

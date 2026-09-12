@@ -146,6 +146,42 @@ paths:
           schema:
             $ref: "#/definitions/Error"
 
+  /v1/runs/{id}/prd-attachment:
+    get:
+      tags: [runs]
+      operationId: getRunPRDAttachment
+      summary: Fetch an evidence image attached to the run's PRD, by its repo-relative path
+      description: >
+        `path` must be one of the run's recorded prd.attachments entries under
+        docs/prd/attachments/ — anything else is rejected.
+      produces:
+        - image/png
+        - image/jpeg
+        - image/gif
+        - image/webp
+      parameters:
+        - name: id
+          in: path
+          required: true
+          type: string
+        - name: path
+          in: query
+          required: true
+          type: string
+      responses:
+        200:
+          description: the attachment
+          schema:
+            type: file
+        400:
+          description: invalid path
+          schema:
+            $ref: "#/definitions/Error"
+        404:
+          description: no such run or file
+          schema:
+            $ref: "#/definitions/Error"
+
   /v1/runs/{id}/approve:
     post:
       tags: [runs]
@@ -361,6 +397,38 @@ definitions:
         type: array
         items:
           type: string
+      attachments:
+        type: array
+        description: evidence images submitted with the PRD (read-only; set via SubmitPRDRequest.attachments)
+        items:
+          $ref: "#/definitions/PRDAttachment"
+
+  PRDAttachment:
+    type: object
+    description: a reference to an evidence image persisted into the run's workspace
+    properties:
+      path:
+        type: string
+        description: workspace-relative path, fetch via GET /v1/runs/{id}/prd-attachment
+      filename:
+        type: string
+      mediaType:
+        type: string
+
+  AttachmentInput:
+    type: object
+    description: an evidence image (e.g. a bug screenshot) submitted with a PRD
+    required: [filename, mediaType, data]
+    properties:
+      filename:
+        type: string
+      mediaType:
+        type: string
+        description: "one of: image/png, image/jpeg, image/gif, image/webp"
+      data:
+        type: string
+        format: byte
+        description: raw image bytes, base64-encoded
 
   SubmitPRDRequest:
     type: object
@@ -370,6 +438,11 @@ definitions:
       markdown:
         type: string
         description: raw markdown PRD; used when prd is not provided
+      attachments:
+        type: array
+        description: evidence images (e.g. bug screenshots) to attach to the PRD
+        items:
+          $ref: "#/definitions/AttachmentInput"
       repoURL:
         type: string
         description: >
@@ -662,6 +735,8 @@ definitions:
       reason:
         type: string
         description: why the run stopped / is paused
+      prd:
+        $ref: "#/definitions/PRD"
       repoURL:
         type: string
       repoKind:

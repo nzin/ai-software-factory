@@ -73,9 +73,24 @@ func WithAcceptApplicationJSON(r *runtime.ClientOperation) {
 	r.ProducesMediaTypes = []string{"application/json"}
 }
 
+// WithAcceptImageGif sets the Accept header to "image/gif".
+func WithAcceptImageGif(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"image/gif"}
+}
+
+// WithAcceptImageJpeg sets the Accept header to "image/jpeg".
+func WithAcceptImageJpeg(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"image/jpeg"}
+}
+
 // WithAcceptImagePng sets the Accept header to "image/png".
 func WithAcceptImagePng(r *runtime.ClientOperation) {
 	r.ProducesMediaTypes = []string{"image/png"}
+}
+
+// WithAcceptImageWebp sets the Accept header to "image/webp".
+func WithAcceptImageWebp(r *runtime.ClientOperation) {
+	r.ProducesMediaTypes = []string{"image/webp"}
 }
 
 // ClientService is the interface for Client methods.
@@ -98,6 +113,12 @@ type ClientService interface {
 
 	// GetRunContext get one run.
 	GetRunContext(ctx context.Context, params *GetRunParams, opts ...ClientOption) (*GetRunOK, error)
+
+	// GetRunPRDAttachment fetch an evidence image attached to the run s p r d by its repo relative path.
+	GetRunPRDAttachment(params *GetRunPRDAttachmentParams, writer io.Writer, opts ...ClientOption) (*GetRunPRDAttachmentOK, error)
+
+	// GetRunPRDAttachmentContext fetch an evidence image attached to the run s p r d by its repo relative path.
+	GetRunPRDAttachmentContext(ctx context.Context, params *GetRunPRDAttachmentParams, writer io.Writer, opts ...ClientOption) (*GetRunPRDAttachmentOK, error)
 
 	// GetRunScreenshot fetch a playwright screenshot written during the run by its repo relative path.
 	GetRunScreenshot(params *GetRunScreenshotParams, writer io.Writer, opts ...ClientOption) (*GetRunScreenshotOK, error)
@@ -319,6 +340,74 @@ func (a *Client) GetRunContext(ctx context.Context, params *GetRunParams, opts .
 	unexpectedSuccess := result.(*GetRunDefault)
 
 	return nil, runtime.NewAPIError("unexpected success response: content available as default response in error", unexpectedSuccess, unexpectedSuccess.Code())
+}
+
+// GetRunPRDAttachment fetches an evidence image attached to the run s p r d by its repo relative path.
+//
+// `path` must be one of the run's recorded prd.attachments entries under docs/prd/attachments/ — anything else is rejected.
+// .
+//
+// This method does not support injected context.
+// However, timeout and opentracing contexts are honored whenever enabled.
+//
+// If you need to pass a specific context, use [Client.GetRunPRDAttachmentContext] instead.
+func (a *Client) GetRunPRDAttachment(params *GetRunPRDAttachmentParams, writer io.Writer, opts ...ClientOption) (*GetRunPRDAttachmentOK, error) {
+	var ctx context.Context
+	if params != nil && params.inner.ctx != nil {
+		ctx = params.inner.ctx
+	} else {
+		ctx = context.Background()
+	}
+
+	return a.GetRunPRDAttachmentContext(ctx, params, writer, opts...)
+}
+
+// GetRunPRDAttachmentContext fetches an evidence image attached to the run s p r d by its repo relative path.
+//
+// `path` must be one of the run's recorded prd.attachments entries under docs/prd/attachments/ — anything else is rejected.
+// .
+//
+// Do not use the deprecated [GetRunPRDAttachmentParams.Context] with this method: it would be ignored.
+func (a *Client) GetRunPRDAttachmentContext(ctx context.Context, params *GetRunPRDAttachmentParams, writer io.Writer, opts ...ClientOption) (*GetRunPRDAttachmentOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetRunPRDAttachmentParams()
+	}
+
+	op := &runtime.ClientOperation{
+		ID:                 "getRunPRDAttachment",
+		Method:             "GET",
+		PathPattern:        "/v1/runs/{id}/prd-attachment",
+		ProducesMediaTypes: []string{"image/png", "image/jpeg", "image/gif", "image/webp"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetRunPRDAttachmentReader{formats: a.formats, writer: writer},
+		Client:             params.HTTPClient,
+	}
+
+	for _, opt := range opts {
+		opt(op)
+	}
+
+	result, err := a.transport.SubmitContext(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetRunPRDAttachmentOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getRunPRDAttachment: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
 }
 
 // GetRunScreenshot fetches a playwright screenshot written during the run by its repo relative path.

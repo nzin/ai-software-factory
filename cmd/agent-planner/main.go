@@ -16,7 +16,7 @@ func main() {
 		DefaultSkills:      planner.Skills,
 		DefaultPort:        9101,
 		Executor: func(b *agentkit.Bootstrapped) a2asrv.AgentExecutor {
-			return b.LLMExecutor()
+			return planner.Executor(b.LLM, b.SystemPrompt)
 		},
 	})
 }

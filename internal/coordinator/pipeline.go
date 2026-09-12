@@ -31,7 +31,7 @@ type pipelineEngine struct {
 func (e *pipelineEngine) Run(ctx context.Context, run *Run) (StageResult, error) {
 	switch {
 	case run.Stage == planner.Role:
-		out, err := e.dispatchText(ctx, run, planner.Role, e.plannerInput(ctx, run))
+		out, err := e.dispatchPlanner(ctx, run, e.plannerInput(ctx, run))
 		if err != nil {
 			return StageResult{}, err
 		}
@@ -154,16 +154,24 @@ func (e *pipelineEngine) client(ctx context.Context, role string) (*a2aclient.Cl
 	return cl, nil
 }
 
-func (e *pipelineEngine) dispatchText(ctx context.Context, run *Run, role, text string) (string, error) {
-	cl, err := e.client(ctx, role)
+// dispatchPlanner sends the planner its prompt plus the run's workspace dir
+// (as a DataPart, reusing factory.DispatchEnvelope purely as a convenient
+// carrier) so the planner's executor can look at any PRD evidence images
+// committed under docs/prd/attachments/. Unlike dispatchEnvelope, the
+// planner's reply is plain prose (parsed by factory.ParsePlan), not a
+// structured ResultEnvelope, so the response side is handled the same way
+// dispatchText's used to be.
+func (e *pipelineEngine) dispatchPlanner(ctx context.Context, run *Run, text string) (string, error) {
+	cl, err := e.client(ctx, planner.Role)
 	if err != nil {
 		return "", err
 	}
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
+	env := factory.DispatchEnvelope{WorkspaceDir: run.WorkspaceDir, PRDText: text}
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(env))
 	msg.ContextID = run.ContextID
 	res, err := cl.SendMessage(ctx, &a2a.SendMessageRequest{Message: msg})
 	if err != nil {
-		return "", fmt.Errorf("coordinator: send to %s: %w", role, err)
+		return "", fmt.Errorf("coordinator: send to %s: %w", planner.Role, err)
 	}
 	return resultText(res), nil
 }

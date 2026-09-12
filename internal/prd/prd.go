@@ -11,9 +11,20 @@ import (
 
 // PRD is a feature request submitted to the factory.
 type PRD struct {
-	Title              string   `json:"title"`
-	Description        string   `json:"description"`
-	AcceptanceCriteria []string `json:"acceptanceCriteria,omitempty"`
+	Title              string       `json:"title"`
+	Description        string       `json:"description"`
+	AcceptanceCriteria []string     `json:"acceptanceCriteria,omitempty"`
+	Attachments        []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is a reference to an evidence image (e.g. a bug screenshot)
+// submitted alongside a PRD and persisted into the run's workspace. It never
+// carries the image bytes themselves — those are written to Path once, at
+// submission time.
+type Attachment struct {
+	Path      string `json:"path"`
+	Filename  string `json:"filename"`
+	MediaType string `json:"mediaType"`
 }
 
 // Validate checks the PRD is usable.

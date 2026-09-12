@@ -8,6 +8,30 @@ import { notifyError } from '@/api/client'
 const router = useRouter()
 const busy = ref(false)
 const advanced = ref(false)
+const maxAttachments = 10
+const attachments = ref([]) // staged { uid, raw: File }
+
+function onAttachmentChange(file, fileList) {
+  if (fileList.length > maxAttachments) {
+    ElMessage.warning(`Only the first ${maxAttachments} images are kept`)
+    fileList.splice(maxAttachments)
+  }
+  attachments.value = fileList
+}
+
+function onAttachmentRemove(_file, fileList) {
+  attachments.value = fileList
+}
+
+/** readAsDataURL wrapped as a promise, stripping the data: prefix. */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).split(',', 2)[1] ?? '')
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
 
 const form = reactive({
   title: '',
@@ -52,6 +76,15 @@ async function submit() {
     }
     if (form.iterationBudget > 0) payload.iterationBudget = form.iterationBudget
     if (form.deadlineSeconds > 0) payload.deadlineSeconds = form.deadlineSeconds
+    if (attachments.value.length) {
+      payload.attachments = await Promise.all(
+        attachments.value.map(async (f) => ({
+          filename: f.name,
+          mediaType: f.raw?.type || 'image/png',
+          data: await fileToBase64(f.raw ?? f),
+        })),
+      )
+    }
 
     const run = await submitPRD(payload)
     ElMessage.success('Run started')
@@ -84,6 +117,25 @@ async function submit() {
           :rows="18"
           placeholder="## Background&#10;&#10;## Requirements&#10;&#10;## Acceptance criteria"
         />
+      </el-form-item>
+
+      <el-form-item label="Evidence screenshots (optional)">
+        <el-upload
+          drag
+          multiple
+          :auto-upload="false"
+          :limit="maxAttachments"
+          list-type="picture-card"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          :on-change="onAttachmentChange"
+          :on-remove="onAttachmentRemove"
+          :on-exceed="() => ElMessage.warning(`Only ${maxAttachments} images allowed`)"
+        >
+          <el-icon><Plus /></el-icon>
+          <template #tip>
+            <p class="hint">PNG/JPEG/GIF/WEBP, up to {{ maxAttachments }} images. Attached as evidence with the PRD.</p>
+          </template>
+        </el-upload>
       </el-form-item>
 
       <el-form-item label="Target repository">

@@ -1,6 +1,7 @@
 package prd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,34 @@ func TestParseJSON(t *testing.T) {
 	}
 	if p.Title != "X" || len(p.AcceptanceCriteria) != 2 {
 		t.Fatalf("bad prd: %+v", p)
+	}
+}
+
+func TestAttachmentsRoundTripThroughJSON(t *testing.T) {
+	p, err := ParseJSON([]byte(`{"title":"X","attachments":[
+		{"path":"docs/prd/attachments/001-bug.png","filename":"bug.png","mediaType":"image/png"}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Attachments) != 1 {
+		t.Fatalf("attachments = %+v", p.Attachments)
+	}
+	a := p.Attachments[0]
+	if a.Path != "docs/prd/attachments/001-bug.png" || a.Filename != "bug.png" || a.MediaType != "image/png" {
+		t.Fatalf("attachment = %+v", a)
+	}
+
+	out, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got PRD
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Attachments) != 1 || got.Attachments[0] != a {
+		t.Fatalf("round-tripped attachments = %+v", got.Attachments)
 	}
 }
 

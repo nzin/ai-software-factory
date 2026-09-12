@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -61,10 +62,16 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 			return bad("provide either prd or markdown")
 		}
 
+		attachments, err := attachmentInputsFromAPI(p.Body.Attachments)
+		if err != nil {
+			return bad(err.Error())
+		}
+
 		opts := SubmitOptions{
 			RepoURL:         p.Body.RepoURL,
 			BaseBranch:      p.Body.BaseBranch,
 			IterationBudget: int(p.Body.IterationBudget),
+			Attachments:     attachments,
 		}
 		if p.Body.DeadlineSeconds > 0 {
 			opts.Deadline = time.Duration(p.Body.DeadlineSeconds) * time.Second
@@ -94,56 +101,44 @@ func Setup(api *operations.CoordinatorAPI, o *Orchestrator) {
 	})
 
 	api.RunsGetRunScreenshotHandler = runs.GetRunScreenshotHandlerFunc(func(p runs.GetRunScreenshotParams) middleware.Responder {
-		// The operation's produces list is scoped to image/png for the 200 path;
-		// write error bodies directly instead of going through the negotiated
-		// producer, which would otherwise try to run a models.Error through the
-		// byte-stream producer picked for image/png.
-		jsonErr := func(status int, msg string) middleware.Responder {
-			return middleware.ResponderFunc(func(rw http.ResponseWriter, _ runtime.Producer) {
-				rw.Header().Set("Content-Type", "application/json")
-				rw.WriteHeader(status)
-				_ = json.NewEncoder(rw).Encode(&models.Error{Message: swag.String(msg)})
-			})
-		}
-		bad := func(msg string) middleware.Responder { return jsonErr(http.StatusBadRequest, msg) }
-		notFound := func(msg string) middleware.Responder { return jsonErr(http.StatusNotFound, msg) }
-
 		r, ok := o.Get(p.ID)
 		if !ok {
-			return notFound("no such run")
+			return jsonErrResponder(http.StatusNotFound, "no such run")
 		}
-		if r.WorkspaceDir == "" {
-			return notFound("run has no workspace")
-		}
-
-		const screenshotPrefix = "test/e2e/screenshots/"
-		reqPath := filepath.Clean(p.Path)
-		if reqPath != p.Path || !strings.HasPrefix(reqPath, screenshotPrefix) || filepath.Ext(reqPath) != ".png" {
-			return bad("path must be a clean path under " + screenshotPrefix + " ending in .png")
-		}
-
-		var known bool
-		for _, t := range r.Tasks {
-			if slices.Contains(t.FilesWritten, reqPath) {
-				known = true
-				break
-			}
-		}
-		if !known {
-			return notFound("no such screenshot on this run")
-		}
-
-		abs, err := filepath.Abs(filepath.Join(r.WorkspaceDir, reqPath))
-		root, rootErr := filepath.Abs(r.WorkspaceDir)
-		if err != nil || rootErr != nil || (abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator))) {
-			return bad("invalid path")
-		}
-
-		f, err := os.Open(abs)
-		if err != nil {
-			return notFound("screenshot not found on disk")
+		f, errResp := resolveWorkspaceFile(r, p.Path, "test/e2e/screenshots/", []string{".png"},
+			func(path string) bool {
+				for _, t := range r.Tasks {
+					if slices.Contains(t.FilesWritten, path) {
+						return true
+					}
+				}
+				return false
+			})
+		if errResp != nil {
+			return errResp
 		}
 		return runs.NewGetRunScreenshotOK().WithPayload(f)
+	})
+
+	api.RunsGetRunPRDAttachmentHandler = runs.GetRunPRDAttachmentHandlerFunc(func(p runs.GetRunPRDAttachmentParams) middleware.Responder {
+		r, ok := o.Get(p.ID)
+		if !ok {
+			return jsonErrResponder(http.StatusNotFound, "no such run")
+		}
+		f, errResp := resolveWorkspaceFile(r, p.Path, attachmentPathPrefix,
+			[]string{".png", ".jpg", ".jpeg", ".gif", ".webp"},
+			func(path string) bool {
+				for _, a := range r.PRD.Attachments {
+					if a.Path == path {
+						return true
+					}
+				}
+				return false
+			})
+		if errResp != nil {
+			return errResp
+		}
+		return runs.NewGetRunPRDAttachmentOK().WithPayload(f)
 	})
 
 	api.RunsDeleteRunHandler = runs.DeleteRunHandlerFunc(func(p runs.DeleteRunParams) middleware.Responder {
@@ -381,6 +376,7 @@ func runToAPI(r *Run) *models.Run {
 		Plan:                r.Plan,
 		UISpec:              r.UISpec,
 		Attempts:            intMap(r.Attempts),
+		Prd:                 prdToAPI(r.PRD),
 		CreatedAt:           strfmt.DateTime(r.CreatedAt),
 		UpdatedAt:           strfmt.DateTime(r.UpdatedAt),
 	}
@@ -416,6 +412,98 @@ func runToAPI(r *Run) *models.Run {
 			Seq: int64(e.Seq), At: strfmt.DateTime(e.At), Kind: e.Kind,
 			Stage: e.Stage, Status: e.Status, Message: e.Message, Detail: e.Detail,
 			Attempt: int64(e.Attempt), DurationMs: e.DurationMs, Actor: e.Actor,
+		})
+	}
+	return out
+}
+
+// jsonErrResponder writes a models.Error body directly instead of going
+// through the negotiated producer, which would otherwise try to run it
+// through the byte-stream producer picked for an image-producing operation.
+func jsonErrResponder(status int, msg string) middleware.Responder {
+	return middleware.ResponderFunc(func(rw http.ResponseWriter, _ runtime.Producer) {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(status)
+		_ = json.NewEncoder(rw).Encode(&models.Error{Message: swag.String(msg)})
+	})
+}
+
+// resolveWorkspaceFile validates that reqPath is a clean path under prefix
+// with one of allowedExt, is known to the run (per the caller's known check),
+// and resolves inside the run's workspace, then opens it. It backs both
+// getRunScreenshot (test/e2e/screenshots/*.png, known via Task.FilesWritten)
+// and getRunPRDAttachment (docs/prd/attachments/*, known via PRD.Attachments).
+func resolveWorkspaceFile(r *Run, reqPath, prefix string, allowedExt []string, known func(string) bool) (*os.File, middleware.Responder) {
+	if r.WorkspaceDir == "" {
+		return nil, jsonErrResponder(http.StatusNotFound, "run has no workspace")
+	}
+
+	clean := filepath.Clean(reqPath)
+	if clean != reqPath || !strings.HasPrefix(clean, prefix) || !slices.Contains(allowedExt, filepath.Ext(clean)) {
+		return nil, jsonErrResponder(http.StatusBadRequest,
+			fmt.Sprintf("path must be a clean path under %s ending in one of %v", prefix, allowedExt))
+	}
+	if !known(clean) {
+		return nil, jsonErrResponder(http.StatusNotFound, "no such file on this run")
+	}
+
+	abs, err := filepath.Abs(filepath.Join(r.WorkspaceDir, clean))
+	root, rootErr := filepath.Abs(r.WorkspaceDir)
+	if err != nil || rootErr != nil || (abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator))) {
+		return nil, jsonErrResponder(http.StatusBadRequest, "invalid path")
+	}
+
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, jsonErrResponder(http.StatusNotFound, "file not found on disk")
+	}
+	return f, nil
+}
+
+// attachmentInputsFromAPI validates and converts request attachments into
+// AttachmentInputs, enforcing the media-type whitelist and size/count limits.
+func attachmentInputsFromAPI(in []*models.AttachmentInput) ([]AttachmentInput, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxAttachments {
+		return nil, fmt.Errorf("at most %d attachments allowed, got %d", MaxAttachments, len(in))
+	}
+	out := make([]AttachmentInput, 0, len(in))
+	for i, a := range in {
+		if a == nil {
+			continue
+		}
+		mediaType := swag.StringValue(a.MediaType)
+		if !AttachmentMediaTypes[mediaType] {
+			return nil, fmt.Errorf("attachment %d: unsupported media type %q", i, mediaType)
+		}
+		var data []byte
+		if a.Data != nil {
+			data = []byte(*a.Data)
+		}
+		if len(data) == 0 {
+			return nil, fmt.Errorf("attachment %d: empty data", i)
+		}
+		if len(data) > MaxAttachmentBytes {
+			return nil, fmt.Errorf("attachment %d: exceeds %d bytes", i, MaxAttachmentBytes)
+		}
+		out = append(out, AttachmentInput{
+			Filename: swag.StringValue(a.Filename), MediaType: mediaType, Data: data,
+		})
+	}
+	return out, nil
+}
+
+func prdToAPI(p prd.PRD) *models.PRD {
+	out := &models.PRD{
+		Title:              swag.String(p.Title),
+		Description:        p.Description,
+		AcceptanceCriteria: p.AcceptanceCriteria,
+	}
+	for _, a := range p.Attachments {
+		out.Attachments = append(out.Attachments, &models.PRDAttachment{
+			Path: a.Path, Filename: a.Filename, MediaType: a.MediaType,
 		})
 	}
 	return out

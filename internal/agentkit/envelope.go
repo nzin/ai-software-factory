@@ -21,7 +21,7 @@ type DispatchFunc func(ctx context.Context, env factory.DispatchEnvelope) (facto
 func DispatchExecutor(fn DispatchFunc) a2asrv.AgentExecutor {
 	return a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
-			env, err := decodeDispatch(ec.Message)
+			env, err := DecodeDispatch(ec.Message)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -36,7 +36,7 @@ func DispatchExecutor(fn DispatchFunc) a2asrv.AgentExecutor {
 	})
 }
 
-func decodeDispatch(msg *a2a.Message) (factory.DispatchEnvelope, error) {
+func DecodeDispatch(msg *a2a.Message) (factory.DispatchEnvelope, error) {
 	if msg == nil {
 		return factory.DispatchEnvelope{}, fmt.Errorf("agentkit: nil message")
 	}

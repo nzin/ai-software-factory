@@ -18,8 +18,11 @@ import (
 	"testing"
 
 	"github.com/go-openapi/loads"
+	"github.com/go-openapi/strfmt"
+	"github.com/go-openapi/swag"
 
 	"github.com/nzin/ai-software-factory/internal/agentkit"
+	"github.com/nzin/ai-software-factory/internal/coordinator/gen/models"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi"
 	"github.com/nzin/ai-software-factory/internal/coordinator/gen/restapi/operations"
 	"github.com/nzin/ai-software-factory/internal/factory"
@@ -354,6 +357,111 @@ func TestGetRunScreenshotOverHTTP(t *testing.T) {
 		t.Fatalf("wrong extension code = %d, want 400", code)
 	}
 	if code := getCode(t, srv.URL+"/v1/runs/does-not-exist/screenshot?path="+url.QueryEscape("test/e2e/screenshots/login.png")); code != http.StatusNotFound {
+		t.Fatalf("unknown run code = %d, want 404", code)
+	}
+}
+
+func TestAttachmentInputsFromAPIValidates(t *testing.T) {
+	valid := &models.AttachmentInput{
+		Filename: swag.String("a.png"), MediaType: swag.String("image/png"),
+		Data: base64Ptr("hello"),
+	}
+	if _, err := attachmentInputsFromAPI(nil); err != nil {
+		t.Fatalf("nil input: %v", err)
+	}
+	if out, err := attachmentInputsFromAPI([]*models.AttachmentInput{valid}); err != nil || len(out) != 1 {
+		t.Fatalf("valid input: out=%+v err=%v", out, err)
+	}
+
+	badType := &models.AttachmentInput{
+		Filename: swag.String("a.svg"), MediaType: swag.String("image/svg+xml"), Data: base64Ptr("hello"),
+	}
+	if _, err := attachmentInputsFromAPI([]*models.AttachmentInput{badType}); err == nil {
+		t.Fatal("want error for unsupported media type")
+	}
+
+	empty := &models.AttachmentInput{Filename: swag.String("a.png"), MediaType: swag.String("image/png"), Data: base64Ptr("")}
+	if _, err := attachmentInputsFromAPI([]*models.AttachmentInput{empty}); err == nil {
+		t.Fatal("want error for empty data")
+	}
+
+	big := strfmt.Base64(make([]byte, MaxAttachmentBytes+1))
+	tooBig := &models.AttachmentInput{
+		Filename: swag.String("a.png"), MediaType: swag.String("image/png"), Data: &big,
+	}
+	if _, err := attachmentInputsFromAPI([]*models.AttachmentInput{tooBig}); err == nil {
+		t.Fatal("want error for oversized attachment")
+	}
+
+	var tooMany []*models.AttachmentInput
+	for i := 0; i <= MaxAttachments; i++ {
+		tooMany = append(tooMany, valid)
+	}
+	if _, err := attachmentInputsFromAPI(tooMany); err == nil {
+		t.Fatal("want error for too many attachments")
+	}
+}
+
+func base64Ptr(s string) *strfmt.Base64 {
+	b := strfmt.Base64([]byte(s))
+	return &b
+}
+
+func TestGetRunPRDAttachmentOverHTTP(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	srv := serve(t, o)
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, o, run.ID)
+
+	dir := t.TempDir()
+	attDir := filepath.Join(dir, "docs", "prd", "attachments")
+	if err := os.MkdirAll(attDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if err := os.WriteFile(filepath.Join(attDir, "001-bug.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real run only gets its WorkspaceDir/PRD.Attachments from Submit; poke
+	// them in directly here since this test drives the HTTP handler, not Submit.
+	stored, _, _ := o.store.Get(run.ID)
+	stored.WorkspaceDir = dir
+	stored.PRD.Attachments = []prd.Attachment{
+		{Path: "docs/prd/attachments/001-bug.png", Filename: "bug.png", MediaType: "image/png"},
+	}
+	if err := o.store.Put(stored); err != nil {
+		t.Fatal(err)
+	}
+
+	base := srv.URL + "/v1/runs/" + run.ID + "/prd-attachment?path="
+
+	res, err := http.Get(base + url.QueryEscape("docs/prd/attachments/001-bug.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("code = %d, want 200", res.StatusCode)
+	}
+	if got, _ := io.ReadAll(res.Body); !bytes.Equal(got, png) {
+		t.Fatalf("body = %v, want %v", got, png)
+	}
+
+	if code := getCode(t, base+url.QueryEscape("../../../../etc/passwd")); code != http.StatusBadRequest {
+		t.Fatalf("traversal code = %d, want 400", code)
+	}
+	if code := getCode(t, base+url.QueryEscape("docs/prd/attachments/other.png")); code != http.StatusNotFound {
+		t.Fatalf("unrecorded file code = %d, want 404", code)
+	}
+	if code := getCode(t, base+url.QueryEscape("docs/prd/attachments/001-bug.txt")); code != http.StatusBadRequest {
+		t.Fatalf("wrong extension code = %d, want 400", code)
+	}
+	if code := getCode(t, srv.URL+"/v1/runs/does-not-exist/prd-attachment?path="+url.QueryEscape("docs/prd/attachments/001-bug.png")); code != http.StatusNotFound {
 		t.Fatalf("unknown run code = %d, want 404", code)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -162,6 +163,100 @@ type SubmitOptions struct {
 	BaseBranch      string
 	IterationBudget int
 	Deadline        time.Duration
+	Attachments     []AttachmentInput
+}
+
+// AttachmentInput is a raw evidence image (e.g. a bug screenshot) submitted
+// alongside a PRD. It is written into the run's workspace once, at submission
+// time; only the resulting prd.Attachment reference is kept afterward.
+type AttachmentInput struct {
+	Filename  string
+	MediaType string
+	Data      []byte
+}
+
+// attachmentPathPrefix is where evidence images submitted with a PRD are
+// written in the run's workspace, mirroring test/e2e/screenshots/ for
+// build-gate screenshots.
+const attachmentPathPrefix = "docs/prd/attachments/"
+
+// AttachmentMediaTypes are the media types a PRD attachment may use — the
+// same raster-only restriction llm.ImageInput vision input requires.
+var AttachmentMediaTypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// Limits on evidence images submitted with a PRD.
+const (
+	MaxAttachmentBytes = 8 << 20 // 8MB
+	MaxAttachments     = 10
+)
+
+// attachAttachments writes the submitted evidence images into repo's
+// workspace and commits them, returning the persisted references in
+// submission order.
+func attachAttachments(ctx context.Context, repo *workspace.Repo, attachments []AttachmentInput) ([]prd.Attachment, error) {
+	refs := make([]prd.Attachment, 0, len(attachments))
+	files := make(map[string]string, len(attachments))
+	for i, a := range attachments {
+		path := attachmentPathPrefix + fmt.Sprintf("%03d-%s", i+1, sanitizeAttachmentFilename(a.Filename, a.MediaType, i+1))
+		files[path] = string(a.Data)
+		refs = append(refs, prd.Attachment{Path: path, Filename: a.Filename, MediaType: a.MediaType})
+	}
+	written, err := repo.WriteFiles(files)
+	if err != nil {
+		return nil, fmt.Errorf("coordinator: write attachments: %w", err)
+	}
+	if err := repo.AddPaths(ctx, written); err != nil {
+		return nil, fmt.Errorf("coordinator: stage attachments: %w", err)
+	}
+	if _, err := repo.Commit(ctx, "prd", fmt.Sprintf("attach %d screenshot(s) as evidence", len(attachments))); err != nil {
+		return nil, fmt.Errorf("coordinator: commit attachments: %w", err)
+	}
+	return refs, nil
+}
+
+// MediaTypeForExt returns the media type for a raster image file extension
+// (with leading dot, e.g. ".png", case-insensitive), and whether it's one of
+// AttachmentMediaTypes.
+func MediaTypeForExt(ext string) (string, bool) {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	default:
+		return "", false
+	}
+}
+
+// sanitizeAttachmentFilename keeps only a safe charset from name, falling
+// back to a generic name derived from mediaType (and idx, to stay unique)
+// when nothing safe remains.
+func sanitizeAttachmentFilename(name, mediaType string, idx int) string {
+	base := filepath.Base(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	if clean := strings.Trim(b.String(), "."); clean != "" {
+		return clean
+	}
+	ext := "png"
+	if parts := strings.SplitN(mediaType, "/", 2); len(parts) == 2 && parts[1] != "" {
+		ext = parts[1]
+	}
+	return fmt.Sprintf("attachment-%d.%s", idx, ext)
 }
 
 // Submit creates a run, kicks off the pipeline in the background, and returns
@@ -216,6 +311,16 @@ func (o *Orchestrator) Submit(ctx context.Context, p prd.PRD, opts SubmitOptions
 		run.WorkspaceDir = repo.Dir
 		run.WorkBranch = repo.WorkBranch
 		run.RepoKind = string(repo.Kind)
+
+		if len(opts.Attachments) > 0 {
+			refs, err := attachAttachments(context.Background(), repo, opts.Attachments)
+			if err != nil {
+				return nil, err
+			}
+			run.PRD.Attachments = refs
+		}
+	} else if len(opts.Attachments) > 0 {
+		return nil, fmt.Errorf("coordinator: attachments require a workspace")
 	}
 
 	o.event(run, EventSubmitted, run.Stage,

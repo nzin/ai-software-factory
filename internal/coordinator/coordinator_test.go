@@ -953,6 +953,53 @@ func TestReviewAcceptPushesTheBranch(t *testing.T) {
 	}
 }
 
+// Attachments submitted with a PRD get written into the run's workspace,
+// committed, and recorded on run.PRD.Attachments.
+func TestSubmitWithAttachmentsCommitsEvidence(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(workspace.NewManager(t.TempDir())))
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{
+		Attachments: []AttachmentInput{{Filename: "bug.png", MediaType: "image/png", Data: []byte("fake-png-bytes")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(run.PRD.Attachments) != 1 {
+		t.Fatalf("attachments = %+v", run.PRD.Attachments)
+	}
+	got := run.PRD.Attachments[0]
+	if got.Filename != "bug.png" || got.MediaType != "image/png" || !strings.HasPrefix(got.Path, attachmentPathPrefix) {
+		t.Fatalf("attachment ref = %+v", got)
+	}
+
+	data, err := os.ReadFile(filepath.Join(run.WorkspaceDir, got.Path))
+	if err != nil {
+		t.Fatalf("read written attachment: %v", err)
+	}
+	if string(data) != "fake-png-bytes" {
+		t.Fatalf("attachment content = %q", data)
+	}
+
+	out, err := exec.Command("git", "-C", run.WorkspaceDir, "log", "--oneline", "-1", "--", got.Path).Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		t.Fatalf("attachment not committed: out=%q err=%v", out, err)
+	}
+}
+
+// Attachments have nowhere durable to live without a workspace.
+func TestSubmitAttachmentsRequireWorkspace(t *testing.T) {
+	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
+	_, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{
+		Attachments: []AttachmentInput{{Filename: "a.png", MediaType: "image/png", Data: []byte("x")}},
+	})
+	if err == nil {
+		t.Fatal("want error when submitting attachments without a workspace")
+	}
+}
+
 func TestReviewRequestChangesReentersTheFactory(t *testing.T) {
 	eng := &prReady{}
 	o := New(nil, WithEngine(eng), WithWorkspace(nil))
@@ -1052,14 +1099,14 @@ func TestReviewCapsRepeatedRejections(t *testing.T) {
 func TestMergeFindingsCollapsesRecurrence(t *testing.T) {
 	round1 := []Finding{{
 		Source: "build-gate", TargetRole: "backend", File: "backend/go.mod",
-		Title: "go build fails: -mod=mod conflicts with Go workspace mode",
+		Title:    "go build fails: -mod=mod conflicts with Go workspace mode",
 		Evidence: "go: -mod may only be set to readonly or vendor when in workspace mode",
 	}}
 	// Same underlying failure next round (evidence identical), but build-gate's
 	// LLM reworded the title — must still collapse into the same entry.
 	round2 := []Finding{{
 		Source: "build-gate", TargetRole: "backend", File: "backend/go.mod",
-		Title: "go build fails because of an active Go workspace forcing -mod=mod",
+		Title:    "go build fails because of an active Go workspace forcing -mod=mod",
 		Evidence: "go: -mod may only be set to readonly or vendor when in workspace mode",
 	}}
 	// A genuinely different problem in the same file/source/role, with no

@@ -68,6 +68,12 @@ func NewCoordinatorAPI(spec *loads.Document) *CoordinatorAPI {
 			return middleware.NotImplemented("operation runs.GetRun has not yet been implemented")
 		}),
 
+		RunsGetRunPRDAttachmentHandler: runs.GetRunPRDAttachmentHandlerFunc(func(params runs.GetRunPRDAttachmentParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation runs.GetRunPRDAttachment has not yet been implemented")
+		}),
+
 		RunsGetRunScreenshotHandler: runs.GetRunScreenshotHandlerFunc(func(params runs.GetRunScreenshotParams) middleware.Responder {
 			_ = params
 
@@ -154,7 +160,10 @@ type CoordinatorAPI struct {
 	JSONConsumer runtime.Consumer
 
 	// BinProducer registers a producer for the following mime types:
+	//   - image/gif
+	//   - image/jpeg
 	//   - image/png
+	//   - image/webp
 	BinProducer runtime.Producer
 	// JSONProducer registers a producer for the following mime types:
 	//   - application/json
@@ -168,6 +177,8 @@ type CoordinatorAPI struct {
 	AgentsGetAgentDetailHandler agents.GetAgentDetailHandler
 	// RunsGetRunHandler sets the operation handler for the get run operation
 	RunsGetRunHandler runs.GetRunHandler
+	// RunsGetRunPRDAttachmentHandler sets the operation handler for the get run p r d attachment operation
+	RunsGetRunPRDAttachmentHandler runs.GetRunPRDAttachmentHandler
 	// RunsGetRunScreenshotHandler sets the operation handler for the get run screenshot operation
 	RunsGetRunScreenshotHandler runs.GetRunScreenshotHandler
 	// WebhooksGithubWebhookHandler sets the operation handler for the github webhook operation
@@ -278,6 +289,9 @@ func (o *CoordinatorAPI) Validate() error {
 	if o.RunsGetRunHandler == nil {
 		unregistered = append(unregistered, "runs.GetRunHandler")
 	}
+	if o.RunsGetRunPRDAttachmentHandler == nil {
+		unregistered = append(unregistered, "runs.GetRunPRDAttachmentHandler")
+	}
 	if o.RunsGetRunScreenshotHandler == nil {
 		unregistered = append(unregistered, "runs.GetRunScreenshotHandler")
 	}
@@ -353,8 +367,14 @@ func (o *CoordinatorAPI) ProducersFor(mediaTypes []string) map[string]runtime.Pr
 	result := make(map[string]runtime.Producer, len(mediaTypes))
 	for _, mt := range mediaTypes {
 		switch mt {
+		case "image/gif":
+			result["image/gif"] = o.BinProducer
+		case "image/jpeg":
+			result["image/jpeg"] = o.BinProducer
 		case "image/png":
 			result["image/png"] = o.BinProducer
+		case "image/webp":
+			result["image/webp"] = o.BinProducer
 		case "application/json":
 			result["application/json"] = o.JSONProducer
 		}
@@ -414,6 +434,10 @@ func (o *CoordinatorAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/v1/runs/{id}"] = runs.NewGetRun(o.context, o.RunsGetRunHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/v1/runs/{id}/prd-attachment"] = runs.NewGetRunPRDAttachment(o.context, o.RunsGetRunPRDAttachmentHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

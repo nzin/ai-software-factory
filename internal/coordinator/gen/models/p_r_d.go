@@ -4,10 +4,13 @@ package models
 
 import (
 	"context"
+	stderrors "errors"
+	"strconv"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag/jsonutils"
+	"github.com/go-openapi/swag/typeutils"
 	"github.com/go-openapi/validate"
 )
 
@@ -18,6 +21,9 @@ type PRD struct {
 
 	// acceptance criteria
 	AcceptanceCriteria []string `json:"acceptanceCriteria"`
+
+	// evidence images submitted with the PRD (read-only; set via SubmitPRDRequest.attachments)
+	Attachments []*PRDAttachment `json:"attachments"`
 
 	// description
 	Description string `json:"description,omitempty"`
@@ -31,6 +37,10 @@ type PRD struct {
 func (m *PRD) Validate(formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.validateAttachments(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validateTitle(formats); err != nil {
 		res = append(res, err)
 	}
@@ -38,6 +48,36 @@ func (m *PRD) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *PRD) validateAttachments(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Attachments) { // not required
+		return nil
+	}
+
+	for i := 0; i < len(m.Attachments); i++ {
+		if typeutils.IsZero(m.Attachments[i]) { // not required
+			continue
+		}
+
+		if m.Attachments[i] != nil {
+			if err := m.Attachments[i].Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 
@@ -50,8 +90,46 @@ func (m *PRD) validateTitle(formats strfmt.Registry) error {
 	return nil
 }
 
-// ContextValidate validates this p r d based on context it is used
-func (m *PRD) ContextValidate(_ context.Context, _ strfmt.Registry) error {
+// ContextValidate validate this p r d based on the context it is used
+func (m *PRD) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.contextValidateAttachments(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
+	return nil
+}
+
+func (m *PRD) contextValidateAttachments(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.Attachments); i++ {
+
+		if m.Attachments[i] != nil {
+
+			if typeutils.IsZero(m.Attachments[i]) { // not required
+				return nil
+			}
+
+			if err := m.Attachments[i].ContextValidate(ctx, formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 

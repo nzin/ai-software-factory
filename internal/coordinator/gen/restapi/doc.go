@@ -14,7 +14,10 @@
 //	  - application/json
 //
 //	Produces:
+//	  - image/gif
+//	  - image/jpeg
 //	  - image/png
+//	  - image/webp
 //	  - application/json
 //
 // swagger:meta

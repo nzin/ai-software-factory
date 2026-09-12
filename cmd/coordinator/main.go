@@ -13,7 +13,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-openapi/loads"
@@ -81,9 +83,17 @@ func newOrchestrator(catalogURL, wsRoot, localGitRoot, storeDSN, baseBranch stri
 	return o
 }
 
+// imagePaths collects repeatable --image flag values.
+type imagePaths []string
+
+func (p *imagePaths) String() string     { return strings.Join(*p, ",") }
+func (p *imagePaths) Set(v string) error { *p = append(*p, v); return nil }
+
 func cmdSubmit(args []string) {
 	fs := flag.NewFlagSet("submit", flag.ExitOnError)
 	prdPath := fs.String("prd", "", "path to the PRD (markdown or JSON); '-' for stdin")
+	var images imagePaths
+	fs.Var(&images, "image", "path to an evidence screenshot to attach to the PRD (png/jpg/gif/webp); repeatable")
 	repoURL := fs.String("repo", "", "target repo: '' (new local), file:///path (local), https/git URL (remote)")
 	baseBranch := fs.String("base-branch", "main", "branch to base the work on")
 	out := fs.String("out", "", "write the plan to this file instead of stdout")
@@ -103,11 +113,16 @@ func cmdSubmit(args []string) {
 	if err != nil {
 		log.Fatalf("coordinator submit: %v", err)
 	}
+	attachments, err := readAttachments(images)
+	if err != nil {
+		log.Fatalf("coordinator submit: %v", err)
+	}
 
 	orch := newOrchestrator(*catalogURL, *wsRoot, *localGitRoot, "memory", *baseBranch)
 	run, err := orch.Submit(context.Background(), doc, coordinator.SubmitOptions{
 		RepoURL: *repoURL, BaseBranch: *baseBranch,
 		IterationBudget: *budget, Deadline: *deadline,
+		Attachments: attachments,
 	})
 	if err != nil {
 		log.Fatalf("coordinator submit: %v", err)
@@ -225,4 +240,27 @@ func readPRD(path string) (prd.PRD, error) {
 		return prd.PRD{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return doc, nil
+}
+
+// readAttachments reads each --image path into an AttachmentInput, sniffing
+// its media type from the file extension.
+func readAttachments(paths []string) ([]coordinator.AttachmentInput, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	out := make([]coordinator.AttachmentInput, 0, len(paths))
+	for _, p := range paths {
+		mediaType, ok := coordinator.MediaTypeForExt(filepath.Ext(p))
+		if !ok {
+			return nil, fmt.Errorf("--image %s: unsupported extension (want png/jpg/jpeg/gif/webp)", p)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("--image %s: %w", p, err)
+		}
+		out = append(out, coordinator.AttachmentInput{
+			Filename: filepath.Base(p), MediaType: mediaType, Data: data,
+		})
+	}
+	return out, nil
 }

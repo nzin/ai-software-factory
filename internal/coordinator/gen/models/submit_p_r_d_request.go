@@ -5,6 +5,7 @@ package models
 import (
 	"context"
 	stderrors "errors"
+	"strconv"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
@@ -16,6 +17,9 @@ import (
 //
 // swagger:model SubmitPRDRequest
 type SubmitPRDRequest struct {
+
+	// evidence images (e.g. bug screenshots) to attach to the PRD
+	Attachments []*AttachmentInput `json:"attachments"`
 
 	// branch to base the work on (default main)
 	BaseBranch string `json:"baseBranch,omitempty"`
@@ -41,6 +45,10 @@ type SubmitPRDRequest struct {
 func (m *SubmitPRDRequest) Validate(formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.validateAttachments(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validatePrd(formats); err != nil {
 		res = append(res, err)
 	}
@@ -48,6 +56,36 @@ func (m *SubmitPRDRequest) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *SubmitPRDRequest) validateAttachments(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Attachments) { // not required
+		return nil
+	}
+
+	for i := 0; i < len(m.Attachments); i++ {
+		if typeutils.IsZero(m.Attachments[i]) { // not required
+			continue
+		}
+
+		if m.Attachments[i] != nil {
+			if err := m.Attachments[i].Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 
@@ -78,6 +116,10 @@ func (m *SubmitPRDRequest) validatePrd(formats strfmt.Registry) error {
 func (m *SubmitPRDRequest) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.contextValidateAttachments(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidatePrd(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -85,6 +127,35 @@ func (m *SubmitPRDRequest) ContextValidate(ctx context.Context, formats strfmt.R
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *SubmitPRDRequest) contextValidateAttachments(ctx context.Context, formats strfmt.Registry) error {
+
+	for i := 0; i < len(m.Attachments); i++ {
+
+		if m.Attachments[i] != nil {
+
+			if typeutils.IsZero(m.Attachments[i]) { // not required
+				return nil
+			}
+
+			if err := m.Attachments[i].ContextValidate(ctx, formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("attachments" + "." + strconv.Itoa(i))
+				}
+
+				return err
+			}
+		}
+
+	}
+
 	return nil
 }
 

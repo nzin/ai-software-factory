@@ -272,6 +272,56 @@ func init() {
         }
       }
     },
+    "/v1/runs/{id}/prd-attachment": {
+      "get": {
+        "description": "` + "`" + `path` + "`" + ` must be one of the run's recorded prd.attachments entries under docs/prd/attachments/ — anything else is rejected.\n",
+        "produces": [
+          "image/png",
+          "image/jpeg",
+          "image/gif",
+          "image/webp"
+        ],
+        "tags": [
+          "runs"
+        ],
+        "summary": "Fetch an evidence image attached to the run's PRD, by its repo-relative path",
+        "operationId": "getRunPRDAttachment",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "path",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the attachment",
+            "schema": {
+              "type": "file"
+            }
+          },
+          "400": {
+            "description": "invalid path",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "404": {
+            "description": "no such run or file",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{id}/reject": {
       "post": {
         "tags": [
@@ -541,6 +591,29 @@ func init() {
         }
       }
     },
+    "AttachmentInput": {
+      "description": "an evidence image (e.g. a bug screenshot) submitted with a PRD",
+      "type": "object",
+      "required": [
+        "filename",
+        "mediaType",
+        "data"
+      ],
+      "properties": {
+        "data": {
+          "description": "raw image bytes, base64-encoded",
+          "type": "string",
+          "format": "byte"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "description": "one of: image/png, image/jpeg, image/gif, image/webp",
+          "type": "string"
+        }
+      }
+    },
     "Error": {
       "type": "object",
       "required": [
@@ -643,10 +716,33 @@ func init() {
             "type": "string"
           }
         },
+        "attachments": {
+          "description": "evidence images submitted with the PRD (read-only; set via SubmitPRDRequest.attachments)",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PRDAttachment"
+          }
+        },
         "description": {
           "type": "string"
         },
         "title": {
+          "type": "string"
+        }
+      }
+    },
+    "PRDAttachment": {
+      "description": "a reference to an evidence image persisted into the run's workspace",
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "path": {
+          "description": "workspace-relative path, fetch via GET /v1/runs/{id}/prd-attachment",
           "type": "string"
         }
       }
@@ -819,6 +915,9 @@ func init() {
         "prURL": {
           "type": "string"
         },
+        "prd": {
+          "$ref": "#/definitions/PRD"
+        },
         "reason": {
           "description": "why the run stopped / is paused",
           "type": "string"
@@ -966,6 +1065,13 @@ func init() {
     "SubmitPRDRequest": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "description": "evidence images (e.g. bug screenshots) to attach to the PRD",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AttachmentInput"
+          }
+        },
         "baseBranch": {
           "description": "branch to base the work on (default main)",
           "type": "string"
@@ -1302,6 +1408,56 @@ func init() {
         }
       }
     },
+    "/v1/runs/{id}/prd-attachment": {
+      "get": {
+        "description": "` + "`" + `path` + "`" + ` must be one of the run's recorded prd.attachments entries under docs/prd/attachments/ — anything else is rejected.\n",
+        "produces": [
+          "image/png",
+          "image/jpeg",
+          "image/gif",
+          "image/webp"
+        ],
+        "tags": [
+          "runs"
+        ],
+        "summary": "Fetch an evidence image attached to the run's PRD, by its repo-relative path",
+        "operationId": "getRunPRDAttachment",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "path",
+            "in": "query",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the attachment",
+            "schema": {
+              "type": "file"
+            }
+          },
+          "400": {
+            "description": "invalid path",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          },
+          "404": {
+            "description": "no such run or file",
+            "schema": {
+              "$ref": "#/definitions/Error"
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{id}/reject": {
       "post": {
         "tags": [
@@ -1571,6 +1727,29 @@ func init() {
         }
       }
     },
+    "AttachmentInput": {
+      "description": "an evidence image (e.g. a bug screenshot) submitted with a PRD",
+      "type": "object",
+      "required": [
+        "filename",
+        "mediaType",
+        "data"
+      ],
+      "properties": {
+        "data": {
+          "description": "raw image bytes, base64-encoded",
+          "type": "string",
+          "format": "byte"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "description": "one of: image/png, image/jpeg, image/gif, image/webp",
+          "type": "string"
+        }
+      }
+    },
     "Error": {
       "type": "object",
       "required": [
@@ -1673,10 +1852,33 @@ func init() {
             "type": "string"
           }
         },
+        "attachments": {
+          "description": "evidence images submitted with the PRD (read-only; set via SubmitPRDRequest.attachments)",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PRDAttachment"
+          }
+        },
         "description": {
           "type": "string"
         },
         "title": {
+          "type": "string"
+        }
+      }
+    },
+    "PRDAttachment": {
+      "description": "a reference to an evidence image persisted into the run's workspace",
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "path": {
+          "description": "workspace-relative path, fetch via GET /v1/runs/{id}/prd-attachment",
           "type": "string"
         }
       }
@@ -1849,6 +2051,9 @@ func init() {
         "prURL": {
           "type": "string"
         },
+        "prd": {
+          "$ref": "#/definitions/PRD"
+        },
         "reason": {
           "description": "why the run stopped / is paused",
           "type": "string"
@@ -1996,6 +2201,13 @@ func init() {
     "SubmitPRDRequest": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "description": "evidence images (e.g. bug screenshots) to attach to the PRD",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AttachmentInput"
+          }
+        },
         "baseBranch": {
           "description": "branch to base the work on (default main)",
           "type": "string"

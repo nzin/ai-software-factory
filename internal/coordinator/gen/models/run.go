@@ -65,6 +65,9 @@ type Run struct {
 	// pr URL
 	PrURL string `json:"prURL,omitempty"`
 
+	// prd
+	Prd *PRD `json:"prd,omitempty"`
+
 	// why the run stopped / is paused
 	Reason string `json:"reason,omitempty"`
 
@@ -129,6 +132,10 @@ func (m *Run) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validatePlanTasks(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validatePrd(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -295,6 +302,29 @@ func (m *Run) validatePlanTasks(formats strfmt.Registry) error {
 			}
 		}
 
+	}
+
+	return nil
+}
+
+func (m *Run) validatePrd(formats strfmt.Registry) error {
+	if typeutils.IsZero(m.Prd) { // not required
+		return nil
+	}
+
+	if m.Prd != nil {
+		if err := m.Prd.Validate(formats); err != nil {
+			ve := new(errors.Validation)
+			if stderrors.As(err, &ve) {
+				return ve.ValidateName("prd")
+			}
+			ce := new(errors.CompositeError)
+			if stderrors.As(err, &ce) {
+				return ce.ValidateName("prd")
+			}
+
+			return err
+		}
 	}
 
 	return nil
@@ -477,6 +507,10 @@ func (m *Run) ContextValidate(ctx context.Context, formats strfmt.Registry) erro
 		res = append(res, err)
 	}
 
+	if err := m.contextValidatePrd(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateTasks(ctx, formats); err != nil {
 		res = append(res, err)
 	}
@@ -594,6 +628,31 @@ func (m *Run) contextValidatePlanTasks(ctx context.Context, formats strfmt.Regis
 			}
 		}
 
+	}
+
+	return nil
+}
+
+func (m *Run) contextValidatePrd(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.Prd != nil {
+
+		if typeutils.IsZero(m.Prd) { // not required
+			return nil
+		}
+
+		if err := m.Prd.ContextValidate(ctx, formats); err != nil {
+			ve := new(errors.Validation)
+			if stderrors.As(err, &ve) {
+				return ve.ValidateName("prd")
+			}
+			ce := new(errors.CompositeError)
+			if stderrors.As(err, &ce) {
+				return ce.ValidateName("prd")
+			}
+
+			return err
+		}
 	}
 
 	return nil

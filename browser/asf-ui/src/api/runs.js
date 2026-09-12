@@ -23,3 +23,7 @@ export const screenshotURL = (runId, path) =>
 /** isScreenshot reports whether a filesWritten entry is a build-gate screenshot. */
 export const isScreenshot = (path) =>
   path.startsWith('test/e2e/screenshots/') && path.toLowerCase().endsWith('.png')
+
+/** prdAttachmentURL builds a direct <img>-able URL for a PRD evidence attachment. */
+export const prdAttachmentURL = (runId, path) =>
+  `/v1/runs/${runId}/prd-attachment?path=${encodeURIComponent(path)}`
