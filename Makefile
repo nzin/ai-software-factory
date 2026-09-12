@@ -88,6 +88,7 @@ local-git:
 		&& git init -q -b main \
 		&& git config user.email "factory@local" \
 		&& git config user.name "AI Software Factory" \
+		&& git config receive.denyCurrentBranch updateInstead \
 		&& git commit -q --allow-empty -m "chore: base" )
 
 ## up: build + start the factory (catalog, coordinator, all agents)

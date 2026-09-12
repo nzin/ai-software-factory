@@ -218,6 +218,11 @@ func (m *Manager) resolveBareName(ctx context.Context, ref RepoRef) (RepoRef, er
 			return ref, fmt.Errorf("workspace: init local_git project %q: %w", ref.URL, err)
 		}
 		if err := runAll(ctx, dir, [][]string{
+			// Runs push their work branch back here, and a later re-delivery
+			// (e.g. after human review) can push again while that branch is
+			// checked out. updateInstead lets that push succeed by updating
+			// the working tree instead of git's default refusal.
+			{"config", "receive.denyCurrentBranch", "updateInstead"},
 			{"commit", "-q", "--allow-empty", "-m", "chore: base"},
 		}, false); err != nil {
 			return ref, fmt.Errorf("workspace: init local_git project %q: %w", ref.URL, err)
