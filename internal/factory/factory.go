@@ -13,6 +13,7 @@ import (
 const (
 	RolePlanner          = "planner"
 	RoleUIUXDesigner     = "ui-ux-designer"
+	RoleDesignReviewer   = "design-reviewer"
 	RoleBackendDeveloper = "backend-developer"
 	RoleFrontendDev      = "frontend-developer"
 	RoleMobileDeveloper  = "mobile-developer"

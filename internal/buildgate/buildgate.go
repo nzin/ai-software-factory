@@ -119,6 +119,80 @@ func Check(ctx context.Context, runID, dir string, changed []string) Result {
 	return Result{Findings: c.findings, Summary: summary, Failures: c.failures, Screenshots: c.screenshots}
 }
 
+// RunBuild builds every Go module and npm package this package's own
+// detection finds under dir (the same goModuleDir/packageDirs walk Check
+// uses): `go build ./...` for the Go module, `npm install` then `npm run
+// build` (if a build script exists) for each npm package. Returns combined,
+// labeled output and whether every step succeeded. Unlike Check, it produces
+// no factory.Findings — it's meant to be read directly by an LLM tool caller,
+// not routed through the review pipeline. When nothing buildable is
+// detected, it returns an explanatory message with ok=true (informational,
+// not a failure — mirrors Check's own "no toolchain" case).
+func RunBuild(ctx context.Context, dir string) (output string, ok bool) {
+	var b strings.Builder
+	ok, ranAny := true, false
+	if goDir := goModuleDir(dir); goDir != "" && lookPath("go") {
+		ranAny = true
+		out, k := runGoBuild(ctx, goDir)
+		fmt.Fprintf(&b, "=== go build ./... (%s) ===\n%s\n", shortRel(dir, goDir), out)
+		ok = ok && k
+	}
+	if lookPath("npm") {
+		for _, nd := range packageDirs(dir) {
+			ranAny = true
+			iOut, iOK := runNodeInstall(ctx, nd)
+			fmt.Fprintf(&b, "=== npm install (%s) ===\n%s\n", shortRel(dir, nd), iOut)
+			if !iOK {
+				ok = false
+				continue
+			}
+			bOut, bOK, has := runNodeBuild(ctx, nd)
+			if has {
+				fmt.Fprintf(&b, "=== npm run build (%s) ===\n%s\n", shortRel(dir, nd), bOut)
+				ok = ok && bOK
+			}
+		}
+	}
+	if !ranAny {
+		return "no buildable Go module or npm package detected", true
+	}
+	return b.String(), ok
+}
+
+// RunTests is RunBuild's test-running counterpart: `go test ./...` for the Go
+// module, `npm install` then `npm test` for each npm package (skipping a
+// placeholder or Playwright test script — see runNodeTest).
+func RunTests(ctx context.Context, dir string) (output string, ok bool) {
+	var b strings.Builder
+	ok, ranAny := true, false
+	if goDir := goModuleDir(dir); goDir != "" && lookPath("go") {
+		ranAny = true
+		out, k := runGoTest(ctx, goDir)
+		fmt.Fprintf(&b, "=== go test ./... (%s) ===\n%s\n", shortRel(dir, goDir), out)
+		ok = ok && k
+	}
+	if lookPath("npm") {
+		for _, nd := range packageDirs(dir) {
+			ranAny = true
+			iOut, iOK := runNodeInstall(ctx, nd)
+			fmt.Fprintf(&b, "=== npm install (%s) ===\n%s\n", shortRel(dir, nd), iOut)
+			if !iOK {
+				ok = false
+				continue
+			}
+			tOut, tOK, has := runNodeTest(ctx, nd)
+			if has {
+				fmt.Fprintf(&b, "=== npm test (%s) ===\n%s\n", shortRel(dir, nd), tOut)
+				ok = ok && tOK
+			}
+		}
+	}
+	if !ranAny {
+		return "no testable Go module or npm package detected", true
+	}
+	return b.String(), ok
+}
+
 type checker struct {
 	dir           string
 	findings      []factory.Finding
@@ -138,15 +212,25 @@ func (c *checker) fail(kind, out, role string) {
 var goErrLine = regexp.MustCompile(`^(\S+\.go):(\d+)(?::\d+)?:\s+(.*)$`)
 
 func (c *checker) checkGo(ctx context.Context, dir string) {
-	if out, ok := run(ctx, dir, nil, "go", "build", "./..."); !ok {
+	if out, ok := runGoBuild(ctx, dir); !ok {
 		c.fail("go build", out, factory.RoleBackendDeveloper)
 		c.goFindings("go build failed", out)
 		return
 	}
-	if out, ok := run(ctx, dir, nil, "go", "test", "./..."); !ok {
+	if out, ok := runGoTest(ctx, dir); !ok {
 		c.fail("go test", out, factory.RoleBackendDeveloper)
 		c.goFindings("go test failed", out)
 	}
+}
+
+// runGoBuild runs `go build ./...` in dir.
+func runGoBuild(ctx context.Context, dir string) (string, bool) {
+	return run(ctx, dir, nil, "go", "build", "./...")
+}
+
+// runGoTest runs `go test ./...` in dir.
+func runGoTest(ctx context.Context, dir string) (string, bool) {
+	return run(ctx, dir, nil, "go", "test", "./...")
 }
 
 func (c *checker) goFindings(title, out string) {
@@ -192,34 +276,62 @@ func parseGoErrors(out string) []factory.Finding {
 // --- Node ---
 
 func (c *checker) checkNode(ctx context.Context, dir string) {
-	scripts, rn, playwright := readPackage(dir)
+	_, rn, _ := readPackage(dir)
 	role := factory.RoleFrontendDev
 	if rn {
 		role = factory.RoleMobileDeveloper
 	}
 
-	if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "install", "--no-audit", "--no-fund"); !ok {
+	if out, ok := runNodeInstall(ctx, dir); !ok {
 		c.fail("npm install", out, role)
 		c.add(buildFinding("npm install failed", out, role))
 		return
 	}
-	if _, has := scripts["build"]; has {
-		if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "run", "build"); !ok {
-			c.fail("npm run build", out, role)
-			c.add(buildFinding("npm run build failed", out, role))
-			return
-		}
+	if out, ok, has := runNodeBuild(ctx, dir); has && !ok {
+		c.fail("npm run build", out, role)
+		c.add(buildFinding("npm run build failed", out, role))
+		return
 	}
 	// A Playwright suite only has real browsers inside the docker-compose
 	// `tester` service (see checkComponent) — running `npm test` here, on the
 	// build gate's own bare filesystem, always fails with a missing browser
 	// binary regardless of what the generated project did right.
-	if s, has := scripts["test"]; has && !isPlaceholderTest(s) && !playwright {
-		if out, ok := run(ctx, dir, []string{"CI=1"}, "npm", "test"); !ok {
-			c.fail("npm test", out, role)
-			c.add(buildFinding("npm test failed", out, role))
-		}
+	if out, ok, has := runNodeTest(ctx, dir); has && !ok {
+		c.fail("npm test", out, role)
+		c.add(buildFinding("npm test failed", out, role))
 	}
+}
+
+// runNodeInstall runs `npm install` in dir.
+func runNodeInstall(ctx context.Context, dir string) (string, bool) {
+	return run(ctx, dir, []string{"CI=1"}, "npm", "install", "--no-audit", "--no-fund")
+}
+
+// runNodeBuild runs `npm run build` in dir when package.json declares a build
+// script; hasBuild reports whether one existed (when false, ok is meaningless
+// and nothing ran).
+func runNodeBuild(ctx context.Context, dir string) (out string, ok, hasBuild bool) {
+	scripts, _, _ := readPackage(dir)
+	if _, has := scripts["build"]; !has {
+		return "", true, false
+	}
+	out, ok = run(ctx, dir, []string{"CI=1"}, "npm", "run", "build")
+	return out, ok, true
+}
+
+// runNodeTest runs `npm test` in dir unless the script is the placeholder or
+// the package is a Playwright suite (see checkNode's comment on why a
+// Playwright suite can't run outside docker-compose's tester container).
+// hasTest reports whether a real test script existed (when false, ok is
+// meaningless and nothing ran).
+func runNodeTest(ctx context.Context, dir string) (out string, ok, hasTest bool) {
+	scripts, _, playwright := readPackage(dir)
+	s, has := scripts["test"]
+	if !has || isPlaceholderTest(s) || playwright {
+		return "", true, false
+	}
+	out, ok = run(ctx, dir, []string{"CI=1"}, "npm", "test")
+	return out, ok, true
 }
 
 func readPackage(dir string) (scripts map[string]string, reactNative, playwright bool) {

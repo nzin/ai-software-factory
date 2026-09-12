@@ -80,6 +80,92 @@ func TestRunSpecAndMockupCommitted(t *testing.T) {
 	}
 }
 
+func TestRunTokensAndComponentsCommitted(t *testing.T) {
+	repo := newRepo(t)
+	fc := &fakeCompleter{reply: "" +
+		"=== FILE: design/spec.md ===\n## Screens\n\n- Home: lists items.\n=== END FILE: design/spec.md ===\n" +
+		"=== FILE: design/mockups/home.svg ===\n<svg></svg>\n=== END FILE: design/mockups/home.svg ===\n" +
+		`=== FILE: design/tokens.json ===` + "\n" + `{"colors":{"primary":"#000"}}` + "\n" + `=== END FILE: design/tokens.json ===` + "\n" +
+		`=== FILE: design/components.json ===` + "\n" + `[{"name":"Button"}]` + "\n" + `=== END FILE: design/components.json ===` + "\n",
+	}
+	env := factory.DispatchEnvelope{
+		Stage:        factory.RoleUIUXDesigner,
+		WorkspaceDir: repo.Dir,
+		PRDText:      "build a todo app",
+	}
+
+	res, err := run(context.Background(), fc, "sys", env)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want := "design/components.json,design/mockups/home.svg,design/spec.md,design/tokens.json"
+	if got := strings.Join(res.FilesWritten, ","); got != want {
+		t.Fatalf("FilesWritten = %q, want %q", got, want)
+	}
+	if res.CommitSHA == "" {
+		t.Fatal("CommitSHA empty")
+	}
+}
+
+func TestRunInvalidTokensJSONDropped(t *testing.T) {
+	repo := newRepo(t)
+	fc := &fakeCompleter{reply: "" +
+		"=== FILE: design/spec.md ===\n## Screens\n\n- Home: lists items.\n=== END FILE: design/spec.md ===\n" +
+		`=== FILE: design/tokens.json ===` + "\n" + `{"colors":{"primary":"#000",}}` + "\n" + `=== END FILE: design/tokens.json ===` + "\n",
+	}
+	env := factory.DispatchEnvelope{
+		Stage:        factory.RoleUIUXDesigner,
+		WorkspaceDir: repo.Dir,
+		PRDText:      "build a todo app",
+	}
+
+	res, err := run(context.Background(), fc, "sys", env)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, p := range res.FilesWritten {
+		if p == "design/tokens.json" {
+			t.Fatalf("invalid design/tokens.json was committed: %v", res.FilesWritten)
+		}
+	}
+	if res.CommitSHA == "" {
+		t.Fatal("CommitSHA empty — spec.md alone should still commit")
+	}
+	if !strings.Contains(res.Summary, "design/tokens.json") {
+		t.Fatalf("Summary does not mention the dropped file: %q", res.Summary)
+	}
+}
+
+func TestDropInvalidJSON(t *testing.T) {
+	cases := []struct {
+		name    string
+		files   map[string]string
+		want    []string
+		wantLen int
+	}{
+		{"empty map", map[string]string{}, nil, 0},
+		{"all valid", map[string]string{
+			"design/tokens.json":     `{"a":1}`,
+			"design/components.json": `[]`,
+		}, nil, 2},
+		{"mixed", map[string]string{
+			"design/tokens.json":     `{"a":1,}`,
+			"design/components.json": `[]`,
+		}, []string{"design/tokens.json"}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dropped := dropInvalidJSON(tc.files)
+			if got := strings.Join(dropped, ","); got != strings.Join(tc.want, ",") {
+				t.Fatalf("dropped = %v, want %v", dropped, tc.want)
+			}
+			if len(tc.files) != tc.wantLen {
+				t.Fatalf("files left = %d, want %d", len(tc.files), tc.wantLen)
+			}
+		})
+	}
+}
+
 func TestRunBlocksWithoutSpecPathFallsBack(t *testing.T) {
 	fc := &fakeCompleter{reply: "" +
 		"=== FILE: design/mockups/home.svg ===\n<svg></svg>\n=== END FILE: design/mockups/home.svg ===\n",

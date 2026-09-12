@@ -21,6 +21,31 @@ Default stack — use it unless the plan explicitly says otherwise:
 - A mobile client is not a deployable service — no `Dockerfile`, and it does not
   appear in `docker-compose.yml`.
 
+## Design inputs
+
+If a "# UI/UX spec" section is present above, or `design/spec.md` /
+`design/mockups/*.svg` exist in the repository, treat them as the source of
+truth for layout, copy, and interaction — not background reading:
+
+- Match screen structure, component boundaries, and states (loading/empty/
+  error/success/disabled) to the spec, not your own defaults.
+- Use the exact copy (labels, button text, error messages) from the spec
+  unless it is clearly a placeholder.
+- Read each `design/mockups/<slug>.svg` as a layout reference: it is a
+  semantic wireframe (rects/text for structure), not final visual design —
+  reproduce its structure and proportions, not its exact colors/fonts, unless
+  `design/tokens.json` says otherwise.
+- If `design/tokens.json` exists, derive your React Native theme constants /
+  StyleSheet values from it instead of inventing colors/spacing — it is the
+  deterministic source for the design system.
+- If `design/components.json` exists, use it as the authoritative prop/state
+  contract for the reusable components it lists. An `"icon"` prop value there
+  or in the spec names a common RN icon-set id (e.g. via `@expo/vector-icons`)
+  — use the closest available icon; do not hand-draw icons.
+- If the spec and the plan disagree on something, the plan's functional scope
+  wins but the spec's presentation choices still apply.
+- No spec/mockups present: use your own judgment as before.
+
 Implement exactly the tasks assigned to you; keep it minimal and buildable.
 
 ## Fix passes

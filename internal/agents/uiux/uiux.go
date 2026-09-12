@@ -8,6 +8,7 @@ package uiux
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,25 @@ import (
 // specPath is the mandatory block the model's Markdown spec must land in — see
 // the output-format contract in agent_prompts/ui-ux-designer.md.
 const specPath = "design/spec.md"
+
+// jsonBlockPaths are optional structured-data blocks that must be valid JSON
+// to be useful to frontend/mobile's deterministic parsing — an LLM
+// occasionally wraps JSON in prose or leaves a trailing comma. A block that
+// fails validation is dropped rather than committed broken.
+var jsonBlockPaths = []string{"design/tokens.json", "design/components.json"}
+
+// dropInvalidJSON removes any jsonBlockPaths entry from files whose content
+// isn't valid JSON, returning the paths dropped.
+func dropInvalidJSON(files map[string]string) []string {
+	var dropped []string
+	for _, p := range jsonBlockPaths {
+		if body, ok := files[p]; ok && !json.Valid([]byte(body)) {
+			delete(files, p)
+			dropped = append(dropped, p)
+		}
+	}
+	return dropped
+}
 
 // Completer is the slice of *llm.Client the executor needs — a seam for tests.
 type Completer interface {
@@ -52,6 +72,7 @@ func run(ctx context.Context, client Completer, systemPrompt string, env factory
 		// the raw reply is the spec, same as before this feature existed.
 		return factory.ResultEnvelope{Role: env.Stage, Summary: raw}, nil
 	}
+	dropped := dropInvalidJSON(files)
 
 	repo, err := workspace.Open(ctx, env.WorkspaceDir)
 	if err != nil {
@@ -68,9 +89,13 @@ func run(ctx context.Context, client Completer, systemPrompt string, env factory
 	if err != nil {
 		return factory.ResultEnvelope{}, err
 	}
+	summary := strings.TrimSpace(spec)
+	if len(dropped) > 0 {
+		summary += fmt.Sprintf("\n\n(dropped invalid JSON: %s)", strings.Join(dropped, ", "))
+	}
 	return factory.ResultEnvelope{
 		Role:         env.Stage,
-		Summary:      strings.TrimSpace(spec),
+		Summary:      summary,
 		CommitSHA:    sha,
 		FilesWritten: written,
 	}, nil

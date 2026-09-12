@@ -3,7 +3,10 @@ package devagent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,30 +33,54 @@ func (f *fakeCompleter) Complete(_ context.Context, _, user string) (string, err
 }
 
 // fakeAgenticCompleter additionally implements CompleteAgentic: it calls the
-// "read_file" tool once (recording what it got back) before returning its
-// canned reply, so a test can assert a fix pass actually took the agentic
-// path and that the tool exec function it was given works against the real
-// repo.
+// "read_file" tool once (recording what it got back), then — for each entry
+// in writes — calls "write_file" via the exec func it was given, so a test
+// can assert an agentic pass actually took the tool-use path, that its tool
+// exec function works against the real repo, and that a real write_file call
+// lands on disk and gets committed. Its final reply is plain prose (a
+// summary), matching what a real agentic completion returns.
 type fakeAgenticCompleter struct {
 	fakeCompleter
 	agenticCalls int
 	gotTools     []llm.Tool
 	toolResult   string
 	toolErr      error
+	writes       map[string]string   // path -> content, written via write_file on every call (unless writesSeq is set)
+	writesSeq    []map[string]string // when set, call N (0-indexed) writes writesSeq[N] instead of writes — for a multi-call test where each call must touch something different
+	afterWrite   error               // if set, CompleteAgentic returns this error after making the writes
 }
 
 func (f *fakeAgenticCompleter) CompleteAgentic(ctx context.Context, _, user string, tools []llm.Tool, exec llm.ToolExecFunc, _ int) (string, error) {
 	f.agenticCalls++
 	f.gotTools = tools
+	writes := f.writes
+	if f.writesSeq != nil {
+		writes = nil
+		if idx := f.agenticCalls - 1; idx < len(f.writesSeq) {
+			writes = f.writesSeq[idx]
+		}
+	}
 	if exec != nil {
 		f.toolResult, f.toolErr = exec(ctx, "read_file", json.RawMessage(`{"path":"main.go"}`))
+		for path, content := range writes {
+			input, err := json.Marshal(map[string]string{"path": path, "content": content})
+			if err != nil {
+				return "", err
+			}
+			if _, err := exec(ctx, "write_file", input); err != nil {
+				return "", err
+			}
+		}
+	}
+	if f.afterWrite != nil {
+		return "", f.afterWrite
 	}
 	f.calls = append(f.calls, user)
 	i := len(f.calls) - 1
 	if i < len(f.replies) {
 		return f.replies[i], nil
 	}
-	return "[]", nil
+	return "done", nil
 }
 
 func newRepo(t *testing.T) *workspace.Repo {
@@ -279,9 +306,7 @@ func TestExecutorFixPassUsesAgenticPathWhenAvailable(t *testing.T) {
 			{Severity: "high", TargetRole: "backend", File: "main.go", Line: 1, Title: "some finding"},
 		},
 	}
-	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{
-		"=== FILE: main.go ===\npackage main // fixed\n=== END FILE: main.go ===\n",
-	}}}
+	ac := &fakeAgenticCompleter{writes: map[string]string{"main.go": "package main // fixed\n"}}
 
 	got, err := run(ctx, ac, "sys", env, options{})
 	if err != nil {
@@ -294,13 +319,13 @@ func TestExecutorFixPassUsesAgenticPathWhenAvailable(t *testing.T) {
 	for _, tl := range ac.gotTools {
 		toolNames = append(toolNames, tl.Name)
 	}
-	for _, want := range []string{"read_file", "git_log", "git_diff", "grep"} {
+	for _, want := range []string{"read_file", "git_log", "git_diff", "grep", "write_file", "edit_file", "run_build", "run_tests"} {
 		found := false
 		for _, n := range toolNames {
 			found = found || n == want
 		}
 		if !found {
-			t.Fatalf("fixPassTools() = %v, missing %q", toolNames, want)
+			t.Fatalf("devTools() = %v, missing %q", toolNames, want)
 		}
 	}
 	if ac.toolErr != nil {
@@ -309,17 +334,22 @@ func TestExecutorFixPassUsesAgenticPathWhenAvailable(t *testing.T) {
 	if !strings.Contains(ac.toolResult, "package main") {
 		t.Fatalf("exec(read_file, main.go) = %q, want it to contain the seeded file's content", ac.toolResult)
 	}
-	if !strings.Contains(ac.calls[0], "read_file, git_log, git_diff, grep") {
+	if !strings.Contains(ac.calls[0], "read_file, git_log, git_diff, grep") ||
+		!strings.Contains(ac.calls[0], "write_file, edit_file, run_build,\nrun_tests") {
 		t.Fatalf("fix-pass prompt missing tool-availability note:\n%s", ac.calls[0])
 	}
 	if got.CommitSHA == "" {
 		t.Fatal("CommitSHA empty")
 	}
+	if got := strings.Join(got.FilesWritten, ","); got != "main.go" {
+		t.Fatalf("FilesWritten = %q, want main.go (written via the write_file tool call)", got)
+	}
 }
 
-// Attempt 0 (a from-scratch build) has nothing to investigate yet, so it must
-// use the plain path even when the client supports CompleteAgentic.
-func TestExecutorAttemptZeroNeverUsesAgenticPath(t *testing.T) {
+// Attempt 0 (a from-scratch build) has nothing to investigate against a prior
+// attempt, but it still uses the agentic tool-use path when the client
+// supports it — the model can read/write/verify from the very first pass.
+func TestExecutorAttemptZeroUsesAgenticPathWhenAvailable(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(t)
 
@@ -330,18 +360,46 @@ func TestExecutorAttemptZeroNeverUsesAgenticPath(t *testing.T) {
 		PRDText:      "build a quote service",
 		Tasks:        []factory.PlanTask{{ID: "T1", Title: "only task"}},
 	}
-	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{
-		"=== FILE: main.go ===\npackage main\n=== END FILE: main.go ===\n",
-	}}}
+	ac := &fakeAgenticCompleter{writes: map[string]string{"main.go": "package main\n"}}
 
-	if _, err := run(ctx, ac, "sys", env, options{}); err != nil {
+	got, err := run(ctx, ac, "sys", env, options{})
+	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if ac.agenticCalls != 0 {
-		t.Fatalf("CompleteAgentic calls = %d, want 0 on attempt 0", ac.agenticCalls)
+	if ac.agenticCalls != 1 {
+		t.Fatalf("CompleteAgentic calls = %d, want 1 on attempt 0 when the client supports it", ac.agenticCalls)
 	}
-	if len(ac.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1", len(ac.calls))
+	if got.CommitSHA == "" {
+		t.Fatal("CommitSHA empty")
+	}
+}
+
+// A client that only implements Completer (not AgenticCompleter) must still
+// work on attempt 0 via the plain, block-parsing fallback.
+func TestExecutorAttemptZeroUsesPlainPathWithoutAgenticSupport(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage:        factory.RoleBackendDeveloper,
+		WorkspaceDir: repo.Dir,
+		BaseBranch:   "main",
+		PRDText:      "build a quote service",
+		Tasks:        []factory.PlanTask{{ID: "T1", Title: "only task"}},
+	}
+	fc := &fakeCompleter{replies: []string{
+		"=== FILE: main.go ===\npackage main\n=== END FILE: main.go ===\n",
+	}}
+
+	got, err := run(ctx, fc, "sys", env, options{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(fc.calls) != 1 {
+		t.Fatalf("Complete calls = %d, want 1", len(fc.calls))
+	}
+	if got.CommitSHA == "" {
+		t.Fatal("CommitSHA empty")
 	}
 }
 
@@ -376,5 +434,182 @@ func TestRunOnceTruncatedCommitsCompleteFiles(t *testing.T) {
 	}
 	if subs := commitSubjects(t, repo.Dir); len(subs) != 2 {
 		t.Fatalf("commits = %v, want 1 task commit + base", subs)
+	}
+}
+
+// On the agentic path, changes land on disk via write_file tool calls, not a
+// parsed final text blob — runOnce must commit exactly what those calls
+// touched.
+func TestRunOnceAgenticWritesViaTools(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleBackendDeveloper,
+		Tasks: []factory.PlanTask{{ID: "T1", Title: "everything"}},
+	}
+	ac := &fakeAgenticCompleter{
+		writes:        map[string]string{"main.go": "package main\n"},
+		fakeCompleter: fakeCompleter{replies: []string{"wrote main.go to get things going"}},
+	}
+
+	res, err := runOnce(ctx, ac, "sys", env, repo, options{})
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if got := strings.Join(res.FilesWritten, ","); got != "main.go" {
+		t.Fatalf("FilesWritten = %q, want main.go", got)
+	}
+	if !strings.Contains(res.Summary, "wrote main.go to get things going") {
+		t.Fatalf("Summary should carry the model's prose: %q", res.Summary)
+	}
+	if res.CommitSHA == "" {
+		t.Fatal("CommitSHA empty")
+	}
+	got, err := toolReadFile(repo.Dir, "main.go")
+	if err != nil || got != "package main\n" {
+		t.Fatalf("file on disk = %q, %v", got, err)
+	}
+}
+
+// A fix pass (attempt > 0) that makes no tool calls is a legitimate "nothing
+// to do" outcome, not an error.
+func TestRunOnceAgenticNoChangesOnFixPass(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+	if _, err := repo.WriteFiles(map[string]string{"main.go": "package main\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Commit(ctx, "backend-developer", "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	env := factory.DispatchEnvelope{
+		Stage:   factory.RoleBackendDeveloper,
+		Attempt: 1,
+		Findings: []factory.Finding{
+			{Severity: "low", File: "main.go", Line: 1, Title: "already fixed"},
+		},
+	}
+	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{"the finding is already addressed"}}}
+
+	res, err := runOnce(ctx, ac, "sys", env, repo, options{})
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if !strings.Contains(res.Summary, "no changes needed") {
+		t.Fatalf("Summary = %q, want a no-changes-needed summary", res.Summary)
+	}
+	if res.CommitSHA != "" {
+		t.Fatal("CommitSHA should be empty when nothing changed")
+	}
+}
+
+// A developer's first pass (attempt 0) making no changes at all is a real
+// failure — it was asked to build something.
+func TestRunOnceAgenticNoChangesOnAttemptZeroIsAnError(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleBackendDeveloper,
+		Tasks: []factory.PlanTask{{ID: "T1", Title: "only task"}},
+	}
+	ac := &fakeAgenticCompleter{fakeCompleter: fakeCompleter{replies: []string{"there's nothing to build here"}}}
+
+	if _, err := runOnce(ctx, ac, "sys", env, repo, options{}); err == nil {
+		t.Fatal("expected an error when a first pass makes no changes")
+	}
+}
+
+// A mid-loop failure (e.g. a transport error after some tool calls already
+// landed) must not leave dirty, uncommitted writes in the workspace — whatever
+// was touched before the failure gets committed, and the error still
+// propagates so the caller knows the pass didn't finish cleanly.
+func TestRunOnceAgenticCommitsPartialWorkOnMidLoopError(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleBackendDeveloper,
+		Tasks: []factory.PlanTask{{ID: "T1", Title: "everything"}},
+	}
+	ac := &fakeAgenticCompleter{
+		writes:     map[string]string{"main.go": "package main\n"},
+		afterWrite: fmt.Errorf("simulated transport failure"),
+	}
+
+	if _, err := runOnce(ctx, ac, "sys", env, repo, options{}); err == nil {
+		t.Fatal("expected the mid-loop error to propagate")
+	}
+	got, err := toolReadFile(repo.Dir, "main.go")
+	if err != nil || got != "package main\n" {
+		t.Fatalf("file on disk = %q, %v — the partial write should survive the error", got, err)
+	}
+	if subs := commitSubjects(t, repo.Dir); len(subs) != 2 { // the partial commit + base
+		t.Fatalf("commits = %v, want the partial write committed despite the error", subs)
+	}
+}
+
+// runBatched must use the agentic path per task when the client supports it,
+// each task getting its own commit.
+func TestRunBatchedUsesAgenticPathPerTask(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleBackendDeveloper,
+		Tasks: []factory.PlanTask{
+			{ID: "T1", Title: "scaffold"},
+			{ID: "T2", Title: "add endpoint"},
+		},
+	}
+	ac := &fakeAgenticCompleter{writesSeq: []map[string]string{
+		{"go.mod": "module x\n\ngo 1.22\n"},
+		{"main.go": "package main\n"},
+	}}
+
+	res, err := runBatched(ctx, ac, "sys", env, repo)
+	if err != nil {
+		t.Fatalf("runBatched: %v", err)
+	}
+	if ac.agenticCalls != 2 {
+		t.Fatalf("CompleteAgentic calls = %d, want 2 (one per task)", ac.agenticCalls)
+	}
+	if got := strings.Join(res.FilesWritten, ","); got != "go.mod,main.go" {
+		t.Fatalf("FilesWritten = %q, want go.mod,main.go", got)
+	}
+	if subs := commitSubjects(t, repo.Dir); len(subs) != 3 { // 2 task commits + base
+		t.Fatalf("commits = %v, want 2 task commits + base", subs)
+	}
+}
+
+// WithPostWrite's harness-materialization hook must still fold its writes in
+// on the agentic path, exactly as it does on the non-agentic path.
+func TestRunOnceAgenticFoldsPostWrite(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	env := factory.DispatchEnvelope{
+		Stage: factory.RoleTestEngineer,
+		Tasks: []factory.PlanTask{{ID: "T1", Title: "write tests"}},
+	}
+	ac := &fakeAgenticCompleter{writes: map[string]string{"main.go": "package main\n"}}
+	postWriteFn := func(dir string) (written, removed []string, err error) {
+		if err := os.WriteFile(filepath.Join(dir, "harness.go"), []byte("package main\n"), 0o644); err != nil {
+			return nil, nil, err
+		}
+		return []string{"harness.go"}, nil, nil
+	}
+
+	var o options
+	WithPostWrite(postWriteFn)(&o)
+
+	res, err := runOnce(ctx, ac, "sys", env, repo, o)
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if got := strings.Join(res.FilesWritten, ","); got != "harness.go,main.go" {
+		t.Fatalf("FilesWritten = %q, want both the model's and postWrite's files", got)
 	}
 }

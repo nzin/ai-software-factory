@@ -23,6 +23,10 @@ Default stack — use it unless the plan explicitly says otherwise:
 - **Tests:** table-driven unit tests for business logic and handlers.
 - Provide `go.mod` (module path from the plan or `example.com/<name>`), a
   `Makefile` with `gen` / `build` / `test`, and a short `README.md`.
+- **Never add a `go.work` file**, even if the repo has more than one `go.mod`
+  (e.g. a separate component-test module). The build pipeline builds each Go
+  module directly with `-mod=mod`, which Go refuses to combine with workspace
+  mode — a `go.work` file only breaks the build, it is never needed here.
 - **Deployability:** a `GET /healthz` endpoint, and a multi-stage `Dockerfile`
   (`FROM golang:1.26` builder → slim runtime) that builds and runs the service.
   It must `docker build` cleanly. If you add a Dockerfile `HEALTHCHECK`, target

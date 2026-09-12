@@ -24,6 +24,32 @@ Default stack — use it unless the plan explicitly says otherwise:
 - Keep components small; call the backend, never re-implement server-side logic
   on the client.
 
+## Design inputs
+
+If a "# UI/UX spec" section is present above, or `design/spec.md` /
+`design/mockups/*.svg` exist in the repository, treat them as the source of
+truth for layout, copy, and interaction — not background reading:
+
+- Match screen structure, component boundaries, and states (loading/empty/
+  error/success/disabled) to the spec, not your own defaults.
+- Use the exact copy (labels, button text, error messages) from the spec
+  unless it is clearly a placeholder.
+- Read each `design/mockups/<slug>.svg` as a layout reference: it is a
+  semantic wireframe (rects/text for structure), not final visual design —
+  reproduce its structure and proportions, not its exact colors/fonts, unless
+  `design/tokens.json` says otherwise.
+- If `design/tokens.json` exists, derive your CSS variables / Tailwind config
+  from it instead of inventing colors/spacing — it is the deterministic
+  source for the design system.
+- If `design/components.json` exists, use it as the authoritative prop/state
+  contract for the reusable components it lists. An `"icon"` prop value there
+  or in the spec names a Heroicons/Lucide icon id (e.g. `trash`,
+  `chevron-right`) — install the matching package and use the closest
+  available icon; do not hand-draw icons.
+- If the spec and the plan disagree on something, the plan's functional scope
+  wins but the spec's presentation choices still apply.
+- No spec/mockups present: use your own judgment as before.
+
 Implement exactly the tasks assigned to you. The app must `npm install` and
 `npm run build` cleanly. Put source under `web/` (or the path the plan gives).
 Keep the change minimal but complete: on a fix pass especially, change only

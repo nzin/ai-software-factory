@@ -926,9 +926,39 @@ func (o *Orchestrator) stop(run *Run, status Status, reason string) {
 	_ = o.store.Put(run)
 }
 
+// mergeFindings folds incoming into the run's whole-history findings list,
+// collapsing a recurring finding (the same underlying problem raised again
+// next round because the fix pass didn't resolve it) into a single entry
+// updated in place, rather than appending a lookalike duplicate every round.
 func mergeFindings(existing, incoming []Finding) []Finding {
-	if len(incoming) == 0 {
-		return existing
+	for _, f := range incoming {
+		if i := recurrenceIndex(existing, f); i >= 0 {
+			existing[i] = f // same problem, newer wording — keep the latest
+			continue
+		}
+		existing = append(existing, f)
 	}
-	return append(existing, incoming...)
+	return existing
+}
+
+// recurrenceIndex returns the index in existing of the same underlying
+// problem as f, or -1 if none matches. The match key is source + target role
+// + file + verbatim evidence: evidence is the raw tool/command output a
+// finding was derived from, so it stays byte-identical across rounds when
+// the same failure recurs — unlike Title/Suggestion, which are an LLM
+// paraphrase that reliably drifts in wording each time it's regenerated, and
+// so can't be used to recognise a repeat. A finding with no evidence is never
+// matched: without it there's no reliable signal that two findings are the
+// same problem rather than two distinct ones that happen to share a file.
+func recurrenceIndex(existing []Finding, f Finding) int {
+	if f.Evidence == "" {
+		return -1
+	}
+	for i, e := range existing {
+		if e.Source == f.Source && e.TargetRole == f.TargetRole &&
+			e.File == f.File && e.Evidence == f.Evidence {
+			return i
+		}
+	}
+	return -1
 }

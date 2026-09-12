@@ -172,6 +172,66 @@ func TestCheckNoComposeCheckForALibrary(t *testing.T) {
 	}
 }
 
+func TestRunBuildCleanGoModule(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.com/clean\n\ngo 1.22\n")
+	write(t, dir, "add.go", "package clean\n\nfunc Add(a, b int) int { return a + b }\n")
+
+	out, ok := RunBuild(context.Background(), dir)
+	if !ok {
+		t.Fatalf("RunBuild failed on a clean module: %s", out)
+	}
+	if !strings.Contains(out, "go build ./...") {
+		t.Fatalf("output missing go build label: %s", out)
+	}
+}
+
+func TestRunBuildReportsCompileError(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.com/broken\n\ngo 1.22\n")
+	write(t, dir, "bad.go", "package broken\n\nfunc Use() int { return missing() }\n")
+
+	out, ok := RunBuild(context.Background(), dir)
+	if ok {
+		t.Fatalf("RunBuild should fail on a compile error: %s", out)
+	}
+	if !strings.Contains(out, "missing") {
+		t.Fatalf("output lost the compile error: %s", out)
+	}
+}
+
+func TestRunTestsReportsFailingTest(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.com/failtest\n\ngo 1.22\n")
+	write(t, dir, "x.go", "package failtest\n\nfunc One() int { return 1 }\n")
+	write(t, dir, "x_test.go", "package failtest\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {\n\tif One() != 2 {\n\t\tt.Fatal(\"expected 2\")\n\t}\n}\n")
+
+	out, ok := RunTests(context.Background(), dir)
+	if ok {
+		t.Fatalf("RunTests should fail when a test fails: %s", out)
+	}
+	if !strings.Contains(out, "go test ./...") {
+		t.Fatalf("output missing go test label: %s", out)
+	}
+}
+
+func TestRunBuildNoToolchainIsInformational(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.com/x\n\ngo 1.22\n")
+	t.Setenv("PATH", "")
+
+	out, ok := RunBuild(context.Background(), dir)
+	if !ok {
+		t.Fatalf("no toolchain must not report a failure: %s", out)
+	}
+	if !strings.Contains(out, "no buildable") {
+		t.Fatalf("output = %q, want an explanatory no-toolchain message", out)
+	}
+}
+
 func TestIsCodeChange(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -257,6 +257,73 @@ func TestBuildGateBouncesToDeveloperThenCaps(t *testing.T) {
 	}
 }
 
+func frontendPlan() *factory.PlanDoc {
+	return &factory.PlanDoc{
+		Prose: "attempt",
+		Tasks: []factory.PlanTask{
+			{ID: "T1", Role: factory.RoleBackendDeveloper, Title: "api"},
+			{ID: "T2", Role: factory.RoleFrontendDev, Title: "spa"},
+		},
+	}
+}
+
+// designReviewBouncesOnce: the plan has a frontend task, so plannedStages
+// includes ui-ux-designer and design-reviewer. Every stage approves except
+// design-reviewer, which requests changes targeting the frontend developer on
+// its first run, then approves.
+type designReviewBouncesOnce struct{ reviewRuns int }
+
+func (d *designReviewBouncesOnce) Run(_ context.Context, run *Run) (StageResult, error) {
+	switch run.Stage {
+	case "planner":
+		return StageResult{Task: Task{Role: "planner", State: "completed"}, Plan: frontendPlan()}, nil
+	case factory.RoleDesignReviewer:
+		d.reviewRuns++
+		if d.reviewRuns == 1 {
+			return StageResult{
+				Task: Task{Role: run.Stage, State: "completed", Verdict: factory.VerdictRequestChanges},
+				Findings: []Finding{{
+					Source: "design-reviewer", Severity: "high", Title: "missing button",
+					TargetRole: factory.RoleFrontendDev,
+				}},
+				Verdict:    factory.VerdictRequestChanges,
+				TargetRole: factory.RoleFrontendDev,
+			}, nil
+		}
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+	default:
+		return StageResult{Task: Task{Role: run.Stage, State: "completed"}, Verdict: factory.VerdictApprove}, nil
+	}
+}
+
+func TestDesignReviewerBouncesToFrontendThenApproves(t *testing.T) {
+	eng := &designReviewBouncesOnce{}
+	o := New(nil, WithEngine(eng), WithWorkspace(nil),
+		WithMaxStageIterations(3), WithDefaults(100, time.Hour))
+
+	run, err := o.Submit(context.Background(), prd.PRD{Title: "X"}, SubmitOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := waitTerminal(t, o, run.ID)
+	if got.Status != StatusDone {
+		t.Fatalf("status = %s / %q", got.Status, got.Reason)
+	}
+	if got.Attempts[factory.RoleFrontendDev] < 1 {
+		t.Fatalf("frontend attempts = %d, want >= 1", got.Attempts[factory.RoleFrontendDev])
+	}
+	if eng.reviewRuns < 2 {
+		t.Fatalf("design-reviewer should run at least twice (bounce + re-check), got %d", eng.reviewRuns)
+	}
+	roles := make([]string, 0, len(got.Tasks))
+	for _, tk := range got.Tasks {
+		roles = append(roles, tk.Role)
+	}
+	if indexOf(roles, factory.RoleDesignReviewer) < 0 {
+		t.Fatalf("design-reviewer never ran: %v", roles)
+	}
+}
+
 func TestBuildGatePassFlowsToReviewers(t *testing.T) {
 	// planThenApprove approves at every non-planner stage, gate included.
 	o := New(nil, WithEngine(planThenApprove{}), WithWorkspace(nil))
@@ -393,7 +460,7 @@ func TestPlannedStagesSkipsUnusedRoles(t *testing.T) {
 	})
 	want = []string{
 		factory.RoleUIUXDesigner, factory.RoleBackendDeveloper, factory.RoleFrontendDev,
-		factory.RoleTestEngineer, factory.RoleBuildGate,
+		factory.RoleTestEngineer, factory.RoleBuildGate, factory.RoleDesignReviewer,
 		factory.RoleSecurityReviewer, factory.RoleCodeReviewer,
 	}
 	if !equal(got, want) {
@@ -979,6 +1046,38 @@ func TestReviewCapsRepeatedRejections(t *testing.T) {
 	}
 	if !hasKind(got, EventAttemptCap) {
 		t.Fatalf("no attempt_cap event: %v", kinds(got))
+	}
+}
+
+func TestMergeFindingsCollapsesRecurrence(t *testing.T) {
+	round1 := []Finding{{
+		Source: "build-gate", TargetRole: "backend", File: "backend/go.mod",
+		Title: "go build fails: -mod=mod conflicts with Go workspace mode",
+		Evidence: "go: -mod may only be set to readonly or vendor when in workspace mode",
+	}}
+	// Same underlying failure next round (evidence identical), but build-gate's
+	// LLM reworded the title — must still collapse into the same entry.
+	round2 := []Finding{{
+		Source: "build-gate", TargetRole: "backend", File: "backend/go.mod",
+		Title: "go build fails because of an active Go workspace forcing -mod=mod",
+		Evidence: "go: -mod may only be set to readonly or vendor when in workspace mode",
+	}}
+	// A genuinely different problem in the same file/source/role, with no
+	// evidence recorded — must never be collapsed into an earlier entry.
+	round3 := []Finding{{
+		Source: "build-gate", TargetRole: "backend", File: "backend/go.mod",
+		Title: "unrelated backend finding with no evidence",
+	}}
+
+	all := mergeFindings(nil, round1)
+	all = mergeFindings(all, round2)
+	all = mergeFindings(all, round3)
+
+	if len(all) != 2 {
+		t.Fatalf("len(all) = %d, want 2 (recurrence collapsed, no-evidence finding kept separate): %+v", len(all), all)
+	}
+	if all[0].Title != round2[0].Title {
+		t.Fatalf("recurring finding not updated to latest wording: got %q", all[0].Title)
 	}
 }
 

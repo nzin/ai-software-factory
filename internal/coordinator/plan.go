@@ -6,7 +6,8 @@ import "github.com/nzin/ai-software-factory/internal/factory"
 var devOrder = []string{factory.RoleBackendDeveloper, factory.RoleFrontendDev, factory.RoleMobileDeveloper}
 
 func isReviewer(stage string) bool {
-	return stage == factory.RoleSecurityReviewer || stage == factory.RoleCodeReviewer
+	return stage == factory.RoleDesignReviewer ||
+		stage == factory.RoleSecurityReviewer || stage == factory.RoleCodeReviewer
 }
 
 // isGate reports whether stage is the deterministic build/test gate. Like a
@@ -21,8 +22,9 @@ func isGate(stage string) bool {
 // then the two reviewers.
 func plannedStages(tasks []factory.PlanTask) []string {
 	devs := developerStages(tasks)
+	hasDesigner := needsDesigner(devs)
 	var stages []string
-	if needsDesigner(devs) {
+	if hasDesigner {
 		stages = append(stages, factory.RoleUIUXDesigner)
 	}
 	stages = append(stages, devs...)
@@ -30,6 +32,9 @@ func plannedStages(tasks []factory.PlanTask) []string {
 		stages = append(stages, factory.RoleTestEngineer)
 	}
 	stages = append(stages, factory.RoleBuildGate)
+	if hasDesigner {
+		stages = append(stages, factory.RoleDesignReviewer)
+	}
 	stages = append(stages, factory.RoleSecurityReviewer, factory.RoleCodeReviewer)
 	return stages
 }

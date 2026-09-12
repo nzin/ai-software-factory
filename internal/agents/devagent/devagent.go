@@ -8,11 +8,15 @@
 // codebase (which truncates the reply). Fix passes and the test-engineer run as
 // a single call.
 //
-// Files come back in an escaping-free block format ("=== FILE: <path> ===" …
-// "=== END FILE: <path> ==="), not a JSON array: a model cannot corrupt raw file
-// bytes with an unescaped newline or quote, and an unterminated final block is a
-// detectable truncation rather than an unparseable blob. A legacy JSON array and
-// a bare "NO CHANGES" are still accepted.
+// When the client supports it (see AgenticCompleter), the model makes its
+// changes directly via write_file/edit_file tool calls as it goes — files
+// land on disk incrementally, and its final answer is just a prose summary.
+// Otherwise (the fallback path) files come back in an escaping-free block
+// format ("=== FILE: <path> ===" … "=== END FILE: <path> ==="), not a JSON
+// array: a model cannot corrupt raw file bytes with an unescaped newline or
+// quote, and an unterminated final block is a detectable truncation rather
+// than an unparseable blob. A legacy JSON array and a bare "NO CHANGES" are
+// still accepted on that path.
 package devagent
 
 import (
@@ -43,18 +47,21 @@ type Completer interface {
 // AgenticCompleter is a Completer that can also run a bounded tool-use loop.
 // The real *llm.Client satisfies this automatically (it has both methods); a
 // test stub implementing only Completer does not, and is used exactly as
-// before. A fix pass (env.Attempt > 0) uses this when available, so it can
-// check a finding against the actual repo/history before answering, rather
-// than only the flattened current-file snapshot and the finding's own
-// (possibly wrong) title/suggestion.
+// before (the block-format fallback). Any pass — first build or fix pass
+// alike — uses this when available, so the model can investigate the actual
+// repo/history and make/verify its changes directly via tools, rather than
+// only the flattened current-file snapshot and one final parsed text blob.
 type AgenticCompleter interface {
 	Completer
 	CompleteAgentic(ctx context.Context, system, user string, tools []llm.Tool, exec llm.ToolExecFunc, maxTurns int) (string, error)
 }
 
-// maxFixPassToolTurns bounds a fix pass's tool-use loop (0 would fall back to
-// llm.Client's own default).
-const maxFixPassToolTurns = 8
+// maxDevToolTurns bounds an agentic pass's tool-use loop (0 would fall back
+// to llm.Client's own default). A turn here can be "run_tests, read a
+// failure, edit_file, run_build again" rather than a quick read, and a
+// from-scratch build doing this needs more room than a fix pass checking one
+// finding — hence a larger budget than the old read-only-investigation loop.
+const maxDevToolTurns = 16
 
 const outputContract = "\n" + `Return ONLY the files to write, each as a block. No prose, no JSON, no markdown
 fences around the blocks:
@@ -79,6 +86,37 @@ Rules:
 - Keep it minimal but complete for the assigned tasks.
 - If (and only if) there is genuinely nothing to change, answer with exactly the
   line: NO CHANGES — never with prose.`
+
+// outputContractAgentic replaces outputContract when the model has
+// write_file/edit_file tools: changes land on disk as the model calls them,
+// not as a final block dump, so the final answer is a short prose summary.
+const outputContractAgentic = "\n" + `Make your changes directly using the write_file and edit_file tools as you
+go — do not describe them in your final answer. Use write_file for a new
+file or a full rewrite; prefer edit_file for a small, targeted change to an
+existing file, so you don't clobber unrelated content.
+
+- Include everything needed to build and run: source, config, go.mod /
+  package.json, tests.
+- If you create a runnable service, include a multi-stage Dockerfile for it
+  that builds and runs cleanly, and a /healthz (or equivalent) endpoint.
+- Before finishing, consider using run_build (and run_tests, if the change
+  has tests) to verify your change actually compiles and passes.
+- If (and only if) there is genuinely nothing to change, do not call
+  write_file or edit_file at all.
+
+When you are done, reply with a short prose summary (a few sentences) of what
+you changed and why — no file blocks, no JSON, no markdown fences.`
+
+// agenticToolsNote lists the tools available on an agentic pass, appended
+// once regardless of attempt (a from-scratch build and a fix pass share the
+// same tool set).
+const agenticToolsNote = `You have tools available: read_file, git_log, git_diff, grep (read-only, to
+investigate before changing anything), and write_file, edit_file, run_build,
+run_tests (to make and verify your changes). Investigate only as much as you
+need; prefer edit_file over write_file for existing files so you don't
+clobber unrelated content.
+
+`
 
 // PostWriteFunc runs over the worktree after a single-call pass has written the
 // model's files and before they are committed. What it writes lands in the same
@@ -149,32 +187,88 @@ func run(ctx context.Context, client Completer, systemPrompt string, env factory
 	return runOnce(ctx, client, systemPrompt, env, repo, o)
 }
 
-// runOnce asks the model for every file in one call and makes one commit. A
-// fix pass (env.Attempt > 0) uses the agentic tool-use path when the client
-// supports it (see AgenticCompleter) — attempt 0 (a from-scratch build) has
-// nothing to investigate yet, so it always uses the plain path.
+// dispatchAndWrite gets the model's changes for one prompt and gets them onto
+// disk: via write_file/edit_file tool calls as they happen (agentic — files
+// are already written by the time this returns; this just drives the loop),
+// or by parsing the model's final text into file blocks and writing them in
+// one shot (the non-agentic fallback, unchanged). The returned *truncatedError
+// is non-nil only on the non-agentic path — the agentic path has nothing to
+// truncate, since writes land incrementally rather than in one final blob.
+//
+// touched is returned even when err != nil, so a caller can still commit
+// whatever a mid-loop failure already wrote to the workspace directory
+// (reused across a run's attempts) instead of leaving it dirty and
+// uncommitted for the next attempt to trip over.
+func dispatchAndWrite(ctx context.Context, client Completer, systemPrompt, user, stage string, repo *workspace.Repo, o options) (touched []string, out string, trunc *truncatedError, err error) {
+	if ac, ok := client.(AgenticCompleter); ok {
+		touched, out, err = completeFilesAgentic(ctx, ac, systemPrompt, user, stage, repo)
+		if o.postWrite != nil && len(touched) > 0 {
+			var pwErr error
+			if touched, pwErr = postWrite(o.postWrite, repo.Dir, touched); pwErr != nil && err == nil {
+				err = fmt.Errorf("devagent(%s): post-write: %w", stage, pwErr)
+			}
+		}
+		return touched, out, nil, err
+	}
+
+	files, out, ferr := completeFiles(ctx, client, systemPrompt, user, stage)
+	errors.As(ferr, &trunc)
+	if trunc != nil {
+		ferr = nil
+	}
+	if ferr != nil {
+		return nil, "", nil, ferr
+	}
+	if len(files) == 0 {
+		return nil, out, trunc, nil
+	}
+	written, werr := repo.WriteFiles(files)
+	if werr != nil {
+		return nil, "", nil, werr
+	}
+	if o.postWrite != nil {
+		if written, werr = postWrite(o.postWrite, repo.Dir, written); werr != nil {
+			return nil, "", nil, fmt.Errorf("devagent(%s): post-write: %w", stage, werr)
+		}
+	}
+	return written, out, trunc, nil
+}
+
+// commitTouched force-stages and commits whatever touched names — a
+// .gitignore the model authored in this same pass must not be able to
+// silently drop our own source files. It is a no-op when touched is empty.
+func commitTouched(ctx context.Context, repo *workspace.Repo, role, msg string, touched []string) (string, error) {
+	if len(touched) == 0 {
+		return "", nil
+	}
+	if err := repo.AddPaths(ctx, touched); err != nil {
+		return "", err
+	}
+	return repo.Commit(ctx, role, msg)
+}
+
+// runOnce asks the model for every file in one call and makes one commit,
+// using the agentic tool-use path when the client supports it (see
+// AgenticCompleter).
 func runOnce(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, repo *workspace.Repo, o options) (factory.ResultEnvelope, error) {
 	tree, _ := repo.Tree(ctx)
-	ac, agentic := client.(AgenticCompleter)
-	agentic = agentic && env.Attempt > 0
+	_, agentic := client.(AgenticCompleter)
 	user := buildPrompt(ctx, env, repo, tree, agentic)
 
-	var files map[string]string
-	var out string
-	var err error
-	if agentic {
-		files, out, err = completeFilesAgentic(ctx, ac, systemPrompt, user, env.Stage, repo)
-	} else {
-		files, out, err = completeFiles(ctx, client, systemPrompt, user, env.Stage)
-	}
-	var trunc *truncatedError
-	if errors.As(err, &trunc) {
-		err = nil // usable partial: commit what arrived, note it below
+	touched, out, trunc, err := dispatchAndWrite(ctx, client, systemPrompt, user, env.Stage, repo, o)
+	// Commit whatever landed even if the call above ultimately errored (e.g. a
+	// mid-loop transport failure) — see dispatchAndWrite's doc comment.
+	var sha string
+	if len(touched) > 0 {
+		var cerr error
+		if sha, cerr = commitTouched(ctx, repo, env.Stage, taskTitles(env.Tasks), touched); cerr != nil && err == nil {
+			err = cerr
+		}
 	}
 	if err != nil {
 		return factory.ResultEnvelope{}, err
 	}
-	if len(files) == 0 {
+	if len(touched) == 0 {
 		// "Nothing to do" is legitimate for a fix pass (findings already
 		// addressed or judged noise) and for the test-engineer against a
 		// library / docs-only change (there is no runnable service to test).
@@ -187,27 +281,12 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 			}, nil
 		}
 		return factory.ResultEnvelope{}, fmt.Errorf(
-			"devagent(%s): model returned no files (said %q)", env.Stage, head(out, 200))
+			"devagent(%s): model made no changes (said %q)", env.Stage, head(out, 200))
 	}
-	written, err := repo.WriteFiles(files)
-	if err != nil {
-		return factory.ResultEnvelope{}, err
+	summary := fmt.Sprintf("wrote %d files (%s)", len(touched), strings.Join(shortList(touched), ", "))
+	if agentic && strings.TrimSpace(out) != "" {
+		summary += ": " + head(out, 300)
 	}
-	if o.postWrite != nil {
-		if written, err = postWrite(o.postWrite, repo.Dir, written); err != nil {
-			return factory.ResultEnvelope{}, fmt.Errorf("devagent(%s): post-write: %w", env.Stage, err)
-		}
-	}
-	// Force-stage what we just wrote: a .gitignore the model authored in this
-	// same pass must not be able to silently drop our own source files.
-	if err := repo.AddPaths(ctx, written); err != nil {
-		return factory.ResultEnvelope{}, err
-	}
-	sha, err := repo.Commit(ctx, env.Stage, taskTitles(env.Tasks))
-	if err != nil {
-		return factory.ResultEnvelope{}, err
-	}
-	summary := fmt.Sprintf("wrote %d files (%s)", len(written), strings.Join(shortList(written), ", "))
 	if trunc != nil {
 		summary += fmt.Sprintf("; model output cut off before %s — expect a build-gate finding", trunc.lastPath)
 	}
@@ -215,7 +294,7 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 		Role:         env.Stage,
 		Summary:      summary,
 		CommitSHA:    sha,
-		FilesWritten: written,
+		FilesWritten: touched,
 	}, nil
 }
 
@@ -223,6 +302,7 @@ func runOnce(ctx context.Context, client Completer, systemPrompt string, env fac
 // call (scoped to that task, with the earlier tasks' commits visible in the
 // repo snapshot) and its own commit.
 func runBatched(ctx context.Context, client Completer, systemPrompt string, env factory.DispatchEnvelope, repo *workspace.Repo) (factory.ResultEnvelope, error) {
+	_, agentic := client.(AgenticCompleter)
 	seen := map[string]bool{}
 	var allWritten []string
 	var lastSHA string
@@ -230,36 +310,29 @@ func runBatched(ctx context.Context, client Completer, systemPrompt string, env 
 
 	for i, t := range env.Tasks {
 		tree, _ := repo.Tree(ctx)
-		user := buildBatchPrompt(env, repo.Dir, tree, t, taskLabels(env.Tasks[:i]), taskLabels(env.Tasks[i+1:]))
+		user := buildBatchPrompt(env, repo.Dir, tree, t, taskLabels(env.Tasks[:i]), taskLabels(env.Tasks[i+1:]), agentic)
 
-		files, _, err := completeFiles(ctx, client, systemPrompt, user, env.Stage)
-		var trunc *truncatedError
-		if errors.As(err, &trunc) {
+		touched, _, trunc, err := dispatchAndWrite(ctx, client, systemPrompt, user, env.Stage, repo, options{})
+		if trunc != nil {
 			truncNote = fmt.Sprintf("; task %s cut off before %s — expect a build-gate finding", t.ID, trunc.lastPath)
-			err = nil
+		}
+		if len(touched) > 0 {
+			var sha string
+			var cerr error
+			if sha, cerr = commitTouched(ctx, repo, env.Stage, t.Title, touched); cerr != nil && err == nil {
+				err = cerr
+			} else if sha != "" {
+				lastSHA = sha
+			}
 		}
 		if err != nil {
 			return factory.ResultEnvelope{}, err
 		}
-		if len(files) == 0 {
-			log.Printf("devagent(%s): task %s (%s) produced no files — skipping", env.Stage, t.ID, t.Title)
+		if len(touched) == 0 {
+			log.Printf("devagent(%s): task %s (%s) produced no changes — skipping", env.Stage, t.ID, t.Title)
 			continue
 		}
-		written, err := repo.WriteFiles(files)
-		if err != nil {
-			return factory.ResultEnvelope{}, err
-		}
-		if err := repo.AddPaths(ctx, written); err != nil {
-			return factory.ResultEnvelope{}, err
-		}
-		sha, err := repo.Commit(ctx, env.Stage, t.Title)
-		if err != nil {
-			return factory.ResultEnvelope{}, err
-		}
-		if sha != "" {
-			lastSHA = sha
-		}
-		for _, w := range written {
+		for _, w := range touched {
 			if !seen[w] {
 				seen[w] = true
 				allWritten = append(allWritten, w)
@@ -292,13 +365,6 @@ func buildPrompt(ctx context.Context, env factory.DispatchEnvelope, repo *worksp
 	}
 	if env.Attempt > 0 && len(env.Findings) > 0 {
 		fmt.Fprintf(&b, "# Fix pass (attempt %d)\n\nThe previous version was reviewed. A finding's title/suggestion is the\nreviewer's paraphrase, not ground truth — before changing anything, check it\nagainst the evidence quoted below and against the referenced file/line as they\nactually are right now. If the referenced code already does what a finding\nasks, that finding's premise is likely wrong or stale: the real cause is\nprobably elsewhere (a different component, an interaction/state bug) — trace\nit rather than re-editing code that's already correct. Once you're confident\nyou've found the real cause, fix it with the smallest change that does the\njob; do not rewrite files or components beyond what's needed, and keep\neverything else working.\nA `gosec` finding that is a genuine false positive for this PRD may be resolved\nwith a `// #nosec Gxxx -- <reason>` comment on the flagged line instead of a code\nchange — see your role prompt.\n\n", env.Attempt+1)
-		if agentic {
-			b.WriteString("You have read-only tools available (read_file, git_log, git_diff, grep) — " +
-				"use them to check a finding against the actual file/test before acting on it, or to " +
-				"pull in a file the snapshot below omitted for length. Investigate only as much as you " +
-				"need; once you're confident, stop calling tools and answer with the file blocks " +
-				"described at the end of this prompt — do not narrate your investigation in prose.\n\n")
-		}
 		for _, f := range env.Findings {
 			fmt.Fprintf(&b, "- [%s]%s %s:%d — %s\n", f.Severity, findingTag(f), f.File, f.Line, f.Title)
 			if f.Suggestion != "" {
@@ -330,14 +396,19 @@ func buildPrompt(ctx context.Context, env factory.DispatchEnvelope, repo *worksp
 	b.WriteString("\n# Current repository\n\n")
 	writeRepoSnapshot(&b, repo.Dir, tree)
 	b.WriteString("\n")
-	b.WriteString(outputContract)
+	if agentic {
+		b.WriteString(agenticToolsNote)
+		b.WriteString(outputContractAgentic)
+	} else {
+		b.WriteString(outputContract)
+	}
 	return b.String()
 }
 
 // buildBatchPrompt is buildPrompt scoped to a single task: the current task is
 // the only work to do this pass, the other tasks are listed only so the model
 // neither repeats nor pre-empts them.
-func buildBatchPrompt(env factory.DispatchEnvelope, dir string, tree []string, cur factory.PlanTask, earlier, later []string) string {
+func buildBatchPrompt(env factory.DispatchEnvelope, dir string, tree []string, cur factory.PlanTask, earlier, later []string, agentic bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# PRD\n\n%s\n\n", env.PRDText)
 	if env.Plan != "" {
@@ -362,8 +433,14 @@ func buildBatchPrompt(env factory.DispatchEnvelope, dir string, tree []string, c
 	b.WriteString("\n# Current repository\n\n")
 	writeRepoSnapshot(&b, dir, tree)
 	b.WriteString("\n")
-	b.WriteString(outputContract)
-	b.WriteString("\n- Return only the files THIS task needs. Files from earlier tasks are\n  already committed — include one only if this task changes it.")
+	if agentic {
+		b.WriteString(agenticToolsNote)
+		b.WriteString(outputContractAgentic)
+		b.WriteString("\n- Only touch files this task needs. Files from earlier tasks are already\n  committed — change one only if this task needs to.")
+	} else {
+		b.WriteString(outputContract)
+		b.WriteString("\n- Return only the files THIS task needs. Files from earlier tasks are\n  already committed — include one only if this task changes it.")
+	}
 	return b.String()
 }
 
@@ -446,16 +523,24 @@ func completeFiles(ctx context.Context, client Completer, system, user, stage st
 	})
 }
 
-// completeFilesAgentic is completeFiles with a bounded, read-only tool-use
-// loop available to the model (see fixPassTools/toolExecFunc) — used for a
-// fix pass so it can check a finding against the actual repo and its own
-// prior attempts before answering, not only the finding's own text and the
-// flattened current-file snapshot every prompt already carries.
-func completeFilesAgentic(ctx context.Context, client AgenticCompleter, system, user, stage string, repo *workspace.Repo) (map[string]string, string, error) {
-	tools, exec := fixPassTools(), toolExecFunc(repo)
-	return completeFilesWith(stage, user, func(u string) (string, error) {
-		return client.CompleteAgentic(ctx, system, u, tools, exec, maxFixPassToolTurns)
-	})
+// completeFilesAgentic runs one bounded tool-use loop with the full developer
+// tool set (see devTools/toolExecFunc): the model makes its changes directly
+// via write_file/edit_file as it goes — not via file blocks — optionally
+// verifying with run_build/run_tests, and its final text is a prose summary,
+// not a parseable file list. Returns the repo-relative paths the tool calls
+// actually wrote/edited (sorted, deduped) and that final text.
+//
+// touched reflects everything written so far even when err != nil (a
+// genuine API/transport failure mid-loop) — see dispatchAndWrite, which
+// relies on this to avoid discarding real work already on disk. Note that
+// exhausting the turn budget is not such a failure: CompleteAgentic
+// withdraws its tools on the last turn, forcing the model to answer in text
+// instead of erroring out, so this essentially always succeeds by
+// construction.
+func completeFilesAgentic(ctx context.Context, client AgenticCompleter, system, user, stage string, repo *workspace.Repo) ([]string, string, error) {
+	state := newToolState()
+	out, err := client.CompleteAgentic(ctx, system, user, devTools(), toolExecFunc(repo, state), maxDevToolTurns)
+	return state.touched(), out, err
 }
 
 // completeFilesWith drives one completion (plain or agentic — complete does

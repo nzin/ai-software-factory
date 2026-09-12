@@ -5,6 +5,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -148,11 +149,25 @@ const (
 	maxToolResultBytes = 8_000
 )
 
+// finalTurnNotice tells the model its last turn withdrew all tools (see
+// CompleteAgentic) — otherwise a model mid-investigation may not understand
+// why its next tool call was refused.
+const finalTurnNotice = "\n\n[This is your last turn: no more tools are available. " +
+	"Answer now, using only what you've already learned, in the exact format " +
+	"described in your instructions.]"
+
 // CompleteAgentic is Complete with a bounded tool-use loop: the model may call
 // any of tools (executed via exec, capped at maxTurns round-trips — 0 uses
 // defaultMaxToolTurns) before giving its final text answer, which is returned
 // exactly as Complete would return it. Tool calls are not streamed; each
 // round-trip is bounded by callTimeout like a plain Complete call.
+//
+// The last turn withdraws every tool, forcing a text answer instead of one
+// more round-trip: a model that hasn't converged by then (e.g. investigating
+// a cause that isn't visible through any tool it has) would otherwise blow
+// the turn budget and hard-fail the whole dispatch. This only ever returns
+// the "did not finish" error below in the degenerate case of maxTurns <= 0
+// after clamping, which can't happen given the check above.
 func (c *Client) CompleteAgentic(ctx context.Context, system, user string, tools []Tool, exec ToolExecFunc, maxTurns int) (string, error) {
 	if maxTurns <= 0 {
 		maxTurns = defaultMaxToolTurns
@@ -172,10 +187,16 @@ func (c *Client) CompleteAgentic(ctx context.Context, system, user string, tools
 	}
 
 	for turn := 0; turn < maxTurns; turn++ {
-		resp, err := c.callOnce(ctx, params)
+		callParams := params
+		lastTurn := turn == maxTurns-1
+		if lastTurn {
+			callParams.Tools = nil
+		}
+		resp, err := c.callOnce(ctx, callParams)
 		if err != nil {
 			return "", fmt.Errorf("llm: tool-use turn %d: %w", turn, err)
 		}
+		log.Printf("llm: tool-use turn %d: stop_reason=%s (last_turn=%v)", turn, resp.StopReason, lastTurn)
 		if resp.StopReason == anthropic.StopReasonRefusal {
 			return "", fmt.Errorf("llm: model refused the request (%s): %s",
 				resp.StopDetails.Category, resp.StopDetails.Explanation)
@@ -195,11 +216,13 @@ func (c *Client) CompleteAgentic(ctx context.Context, system, user string, tools
 				assistantBlocks = append(assistantBlocks, anthropic.NewRedactedThinkingBlock(b.Data))
 			case anthropic.ToolUseBlock:
 				assistantBlocks = append(assistantBlocks, anthropic.NewToolUseBlock(b.ID, json.RawMessage(b.Input), b.Name))
+				log.Printf("llm: tool-use turn %d: call %s(%s)", turn, b.Name, clip(string(b.Input), 200))
 				out, execErr := exec(ctx, b.Name, b.Input)
 				isErr := execErr != nil
 				if isErr {
 					out = execErr.Error()
 				}
+				log.Printf("llm: tool-use turn %d: %s -> %s (err=%v)", turn, b.Name, clip(out, 200), execErr)
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(b.ID, clip(out, maxToolResultBytes), isErr))
 			}
 		}
@@ -208,15 +231,59 @@ func (c *Client) CompleteAgentic(ctx context.Context, system, user string, tools
 			// whatever text there was rather than looping forever.
 			return textOf(resp)
 		}
+		if turn == maxTurns-2 {
+			// The next turn is the last and will withdraw all tools — warn the
+			// model now, alongside these tool results, so it isn't surprised.
+			toolResults = append(toolResults, anthropic.NewTextBlock(finalTurnNotice))
+		}
 		params.Messages = append(params.Messages, anthropic.NewAssistantMessage(assistantBlocks...))
 		params.Messages = append(params.Messages, anthropic.NewUserMessage(toolResults...))
 	}
 	return "", fmt.Errorf("llm: tool-use loop did not finish within %d turns", maxTurns)
 }
 
-// callOnce is a single non-streaming Messages.New call bounded by callTimeout
-// — the building block CompleteAgentic repeats per tool-use turn.
+// ImageInput is one image attached to a CompleteWithImages call. MediaType
+// must be a raster type Claude's vision accepts — image/png, image/jpeg,
+// image/gif, image/webp — never image/svg+xml: SVG source must be passed as
+// plain text (Claude reads it structurally as markup), not as an image block.
+type ImageInput struct {
+	MediaType string
+	Data      []byte
+}
+
+// CompleteWithImages is Complete with image content blocks attached ahead of
+// the text turn, for agents using Claude's native vision (e.g. comparing a
+// rendered screenshot against a design mockup). Non-streaming only: callers
+// use this for short structured replies, never near streamThreshold.
+func (c *Client) CompleteWithImages(ctx context.Context, system, user string, images []ImageInput) (string, error) {
+	params := c.params(system, user)
+
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(images)+1)
+	for _, img := range images {
+		blocks = append(blocks, anthropic.NewImageBlockBase64(img.MediaType, base64.StdEncoding.EncodeToString(img.Data)))
+	}
+	blocks = append(blocks, anthropic.NewTextBlock(user))
+	params.Messages = []anthropic.MessageParam{anthropic.NewUserMessage(blocks...)}
+
+	resp, err := c.callOnce(ctx, params)
+	if err != nil {
+		return "", err
+	}
+	if resp.StopReason == anthropic.StopReasonRefusal {
+		return "", fmt.Errorf("llm: model refused the request (%s): %s",
+			resp.StopDetails.Category, resp.StopDetails.Explanation)
+	}
+	return textOf(resp)
+}
+
+// callOnce is a single Messages create call bounded by callTimeout — the
+// building block CompleteAgentic repeats per tool-use turn. It streams
+// automatically for large MaxTokens, same as Complete, since the API refuses
+// non-streaming calls whose estimated duration exceeds 10 minutes.
 func (c *Client) callOnce(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if c.maxTokens() > streamThreshold {
+		return c.callOnceStream(ctx, params)
+	}
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	resp, err := c.anth.Messages.New(ctx, params)
@@ -224,6 +291,33 @@ func (c *Client) callOnce(ctx context.Context, params anthropic.MessageNewParams
 		return nil, fmt.Errorf("llm: message create: %w", err)
 	}
 	return resp, nil
+}
+
+// callOnceStream is callOnce over a streaming request, mirroring
+// CompleteStream's accumulate/idle-timeout logic but returning the raw
+// message so callers (CompleteAgentic) can inspect StopReason/tool calls.
+func (c *Client) callOnceStream(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+
+	stream := c.anth.Messages.NewStreaming(ctx, params)
+	var msg anthropic.Message
+
+	idle := time.AfterFunc(idleTimeout, cancel)
+	for stream.Next() {
+		idle.Reset(idleTimeout)
+		if err := msg.Accumulate(stream.Current()); err != nil {
+			return nil, fmt.Errorf("llm: accumulate: %w", err)
+		}
+	}
+	idle.Stop()
+	if err := stream.Err(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("llm: stream stalled or timed out after streaming %d tokens: %w", msg.Usage.OutputTokens, err)
+		}
+		return nil, fmt.Errorf("llm: stream: %w", err)
+	}
+	return &msg, nil
 }
 
 // clip bounds s to n bytes, keeping the end (a tool result's most useful part

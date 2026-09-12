@@ -115,6 +115,10 @@ services:
       - factory-workspace:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
 
+  agent-design-reviewer:
+    <<: *agent
+    command: ["/app/bin/agent-design-reviewer", "--addr", ":9110", "--public-url", "http://agent-design-reviewer:9110"]
+
   agent-security-reviewer:
     <<: *agent
     build:

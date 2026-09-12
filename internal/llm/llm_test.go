@@ -70,6 +70,41 @@ func TestParamsWebSearchTool(t *testing.T) {
 	}
 }
 
+func TestCompleteWithImagesBlockOrder(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	c := testAgenticClient(server)
+
+	out, err := c.CompleteWithImages(context.Background(), "sys", "compare these",
+		[]ImageInput{{MediaType: "image/png", Data: []byte("fakepngbytes")}})
+	if err != nil {
+		t.Fatalf("CompleteWithImages: %v", err)
+	}
+	if out != "ok" {
+		t.Fatalf("out = %q, want %q", out, "ok")
+	}
+
+	messages, _ := gotBody["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %v, want 1 user turn", messages)
+	}
+	content, _ := messages[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content blocks = %d, want 2 (image then text)", len(content))
+	}
+	if content[0].(map[string]any)["type"] != "image" {
+		t.Fatalf("first block type = %v, want image", content[0].(map[string]any)["type"])
+	}
+	if content[1].(map[string]any)["type"] != "text" {
+		t.Fatalf("last block type = %v, want text", content[1].(map[string]any)["type"])
+	}
+}
+
 func TestHasToolIgnoresOtherKeys(t *testing.T) {
 	c := New(modelext.Config{Model: "claude-sonnet-5", Params: map[string]any{"foo": "bar"}})
 	if c.hasTool("web_search") {
@@ -143,6 +178,56 @@ func TestCompleteAgenticRunsToolThenReturnsFinalText(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("expected 2 calls to /v1/messages (one tool turn + one final), got %d", calls.Load())
+	}
+}
+
+// TestCompleteAgenticWithdrawsToolsOnFinalTurn verifies the last allowed turn
+// sends no "tools" field — a real Claude API then cannot answer with
+// stop_reason=tool_use, so a model still investigating on its last turn is
+// forced to give a text answer instead of the whole dispatch hard-failing
+// with "did not finish within N turns" (see CompleteAgentic's doc comment).
+func TestCompleteAgenticWithdrawsToolsOnFinalTurn(t *testing.T) {
+	bodies := []string{
+		`{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_1","name":"echo","input":{"msg":"hi"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`,
+		`{"id":"msg_2","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"final answer"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`,
+	}
+	var reqBodies []map[string]any
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		reqBodies = append(reqBodies, body)
+		n := int(calls.Add(1)) - 1
+		if n >= len(bodies) {
+			n = len(bodies) - 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(bodies[n]))
+	}))
+	t.Cleanup(server.Close)
+	c := testAgenticClient(server)
+
+	exec := func(ctx context.Context, name string, input json.RawMessage) (string, error) {
+		return "ok", nil
+	}
+
+	out, err := c.CompleteAgentic(context.Background(), "sys", "user", []Tool{echoTool}, exec, 2)
+	if err != nil {
+		t.Fatalf("CompleteAgentic: %v", err)
+	}
+	if out != "final answer" {
+		t.Fatalf("out = %q, want %q", out, "final answer")
+	}
+	if len(reqBodies) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(reqBodies))
+	}
+	if _, ok := reqBodies[0]["tools"]; !ok {
+		t.Fatal("first request should still offer tools")
+	}
+	if _, ok := reqBodies[1]["tools"]; ok {
+		t.Fatalf("last request should withdraw tools, got: %v", reqBodies[1]["tools"])
 	}
 }
 
