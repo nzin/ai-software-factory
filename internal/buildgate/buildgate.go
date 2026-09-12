@@ -489,7 +489,7 @@ func (c *checker) extractScreenshots(ctx context.Context, dir string, files []st
 	ps := append([]string{"compose"}, files...)
 	ps = append(ps, "ps", "-a", "-q", "tester")
 	idOut, ok := run(xctx, dir, nil, "docker", ps...)
-	id := strings.TrimSpace(strings.SplitN(idOut, "\n", 2)[0])
+	id := containerID(idOut)
 	if !ok || id == "" {
 		return
 	}
@@ -509,6 +509,21 @@ func (c *checker) extractScreenshots(ctx context.Context, dir string, files []st
 		}
 		return nil
 	})
+}
+
+// containerIDLine matches a `docker compose ps -q`-style container ID: hex,
+// on its own line. run()'s CombinedOutput can put a compose deprecation
+// warning (e.g. the obsolete top-level `version:` key) on stdout/stderr
+// ahead of the ID, so the ID isn't always the first line of output.
+var containerIDLine = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+
+func containerID(out string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		if ln = strings.TrimSpace(ln); containerIDLine.MatchString(ln) {
+			return ln
+		}
+	}
+	return ""
 }
 
 // summarizeComponentTests reports how many [api] and [e2e] tests passed, from

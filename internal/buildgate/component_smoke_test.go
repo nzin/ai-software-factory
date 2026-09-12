@@ -39,7 +39,12 @@ func TestComponentSmoke(t *testing.T) {
 		"HEALTHCHECK --interval=2s --retries=15 CMD wget -qO- http://127.0.0.1/healthz || exit 1",
 		`ENTRYPOINT ["/app"]`,
 	}, "\n")+"\n")
-	write(t, dir, "docker-compose.yml", "services:\n  gateway:\n    build: .\n    ports:\n      - \"${GATEWAY_PORT:-8080}:80\"\n")
+	// The obsolete top-level `version:` key (still common in generated
+	// compose files) makes every `docker compose` invocation print a
+	// deprecation warning ahead of its real output — this fixture keeps that
+	// warning in the loop so a regression in parsing `ps -q`'s output (see
+	// containerID) fails here instead of only in the field.
+	write(t, dir, "docker-compose.yml", "version: \"3.8\"\n\nservices:\n  gateway:\n    build: .\n    ports:\n      - \"${GATEWAY_PORT:-8080}:80\"\n")
 	write(t, dir, "test/component/main.go", smokeAPI)
 	write(t, dir, "test/e2e/home.spec.ts", smokeSpec)
 	if _, _, err := testharness.Materialize(dir); err != nil {
