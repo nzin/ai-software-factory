@@ -20,6 +20,24 @@ using [`a2a-go`](https://github.com/a2aproject/a2a-go). Everything is Go.
 > history, A2A catalog, approve / request-changes controls. See
 > [`plan_next.md`](plan_next.md).
 
+## Web UI
+
+Runs kanban board — every run's current stage, budget, and status at a glance:
+
+![Runs kanban board](docs/screenshots/runs.png)
+
+Per-run detail — status, stage, budget, and a full event timeline (steps, plan, findings, raw log):
+
+![Run detail view](docs/screenshots/run-detail.png)
+
+A2A catalog — the registered agent roster with each agent's model and effort configuration:
+
+![A2A catalog](docs/screenshots/catalog.png)
+
+Submit a PRD — kick off a new run against a target repository and branch:
+
+![Submit a PRD](docs/screenshots/submit.png)
+
 ## Architecture
 
 ### Pipeline workflow
